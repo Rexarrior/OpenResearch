@@ -14,7 +14,7 @@ import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectsHome } from "./components/ProjectsHome";
 import { OfflineBanner } from "./components/OfflineBanner";
-import { RemoteStatus } from "./components/RemoteStatus";
+import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { Button, showAlert, Spinner } from "./components/ui";
 
@@ -114,7 +114,7 @@ export function ProjectsPage() {
               onDeleted={(id) => setScopedQueryData(projectsOptions.queryKey, (current) => current?.filter((project) => project.id !== id))}
             />
           )}
-      {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+      <WorkspaceConnection runtime={runtime} corner />
     </div>
   );
 }
