@@ -73,6 +73,7 @@ export function ProjectsPage() {
   const stateQuery = useQuery(getUiStateQuery());
   const projects = projectsQuery.data;
   const state = stateQuery.data;
+  const onboarding = projects?.length === 0 && state?.onboardingCompleted === false;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
@@ -91,7 +92,7 @@ export function ProjectsPage() {
       {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /></>}
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
-          : projects.length === 0 && !state.onboardingCompleted ? (
+          : onboarding ? (
             <Onboarding
               remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}
@@ -114,7 +115,7 @@ export function ProjectsPage() {
               onDeleted={(id) => setScopedQueryData(projectsOptions.queryKey, (current) => current?.filter((project) => project.id !== id))}
             />
           )}
-      <WorkspaceConnection runtime={runtime} corner />
+      {(runtime.kind === "ssh" || (projects && state && !onboarding)) && <WorkspaceConnection runtime={runtime} corner />}
     </div>
   );
 }

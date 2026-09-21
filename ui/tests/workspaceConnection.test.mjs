@@ -75,34 +75,40 @@ for (const corner of [true, false]) {
   });
 }
 
-for (const scenario of ["loading", "error", "onboarding", "projects"]) {
-  test(`project home exposes connection control during ${scenario}`, () => {
-    const runtime = { kind: "local", version: "test" };
-    const { ProjectsPage } = load("routePages.tsx", {
-      react: hooks().react,
-      "./queries/client": {},
-      "@tanstack/react-query": { useQuery: ({ kind }) => ({
-        data: scenario === "loading" || scenario === "error" ? undefined
-          : kind === "projects" ? [] : { onboardingCompleted: scenario !== "onboarding" },
-        error: scenario === "error" ? new Error("offline") : null,
-      }) },
-      "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },
-      "@tanstack/react-router": { useNavigate: () => () => {} },
-      "./RemoteRuntime": { useRuntime: () => runtime },
-      "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
-      "./paraglide/messages.js": messages,
-      "./components/Onboarding": { Onboarding: "Onboarding" },
-      "./components/ProjectsHome": { ProjectsHome: "ProjectsHome" },
-      "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
-      "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
-      "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
-      "./components/ui": {},
+for (const kind of ["local", "ssh"]) {
+  for (const scenario of ["loading", "error", "onboarding", "projects"]) {
+    test(`${kind} project home connection control during ${scenario}`, () => {
+      const runtime = { kind, version: "test" };
+      const { ProjectsPage } = load("routePages.tsx", {
+        react: hooks().react,
+        "./queries/client": {},
+        "@tanstack/react-query": { useQuery: ({ kind }) => ({
+          data: scenario === "loading" || scenario === "error" ? undefined
+            : kind === "projects" ? [] : { onboardingCompleted: scenario !== "onboarding" },
+          error: scenario === "error" ? new Error("offline") : null,
+        }) },
+        "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },
+        "@tanstack/react-router": { useNavigate: () => () => {} },
+        "./RemoteRuntime": { useRuntime: () => runtime },
+        "./demoSessionState": {}, "./routeResume": {}, "./workspacePersistence": {}, "./panelLayout": {},
+        "./paraglide/messages.js": messages,
+        "./components/Onboarding": { Onboarding: "Onboarding" },
+        "./components/ProjectsHome": { ProjectsHome: "ProjectsHome" },
+        "./components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+        "./components/WorkspaceConnection": { WorkspaceConnection: "WorkspaceConnection" },
+        "./components/UpdateBanner": { UpdateBanner: "UpdateBanner", useUpdateStatus: () => ({}) },
+        "./components/ui": {},
+      });
+      const connection = nodes(ProjectsPage()).find((node) => node.type === "WorkspaceConnection");
+      if (kind === "local" && scenario !== "projects") {
+        assert.equal(connection, undefined);
+        return;
+      }
+      assert.ok(connection);
+      assert.equal(connection.props.runtime, runtime);
+      assert.equal(connection.props.corner, true);
     });
-    const connection = nodes(ProjectsPage()).find((node) => node.type === "WorkspaceConnection");
-    assert.ok(connection);
-    assert.equal(connection.props.runtime, runtime);
-    assert.equal(connection.props.corner, true);
-  });
+  }
 }
 
 for (const outcome of ["success", "failure", "popup-blocked"]) {
@@ -142,9 +148,7 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
     });
     const tree = RemoteHostDialog({ onClose: () => calls.push(["close-dialog"]), onConfigureSsh: () => {} });
     nodes(tree).find((node) => node.type === "button" && nodes(node).some((child) => child.props.children === "research")).props.onClick();
-    // The click handler intentionally returns void; settle the mutation continuation.
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise(setImmediate);
     assert.deepEqual(calls[0], ["open", "/remote-launch", "_blank"]);
     if (outcome === "popup-blocked") {
       assert.deepEqual(calls.slice(1), [["alert", "remote_popup_blocked", "error"]]);

@@ -24,7 +24,7 @@ export function WorkspaceConnection({
       {corner ? (
         <div className="fixed bottom-0 start-0 z-50">
           <Button
-            className="h-auto max-w-48 justify-start rounded-none px-2.5 py-1.5 font-normal"
+            className="h-auto max-w-48 justify-start rounded-none border-b-0 border-s-0 px-2.5 py-1.5 font-normal"
             title={m.remote_dialog_title()}
             aria-haspopup="dialog"
             onClick={() => setDialog("hosts")}
