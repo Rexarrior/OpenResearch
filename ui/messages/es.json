@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "Error al detener:",
   "file_viewer_binary_file_no_inline_preview": "Archivo binario — sin vista previa.",
   "file_viewer_copy_install_command": "Copiar comando de instalación",
+  "file_viewer_copy_contents": "Copiar contenido del archivo",
+  "file_viewer_copy_failed": "No se pudo copiar el contenido del archivo",
   "file_viewer_discard_my_edits_and_reload": "Descartar mis cambios y recargar",
   "file_viewer_dismiss": "Cerrar",
   "file_viewer_dismiss_compile_message": "Cerrar mensaje de compilación",

@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "فشل الإيقاف:",
   "file_viewer_binary_file_no_inline_preview": "ملف ثنائي — لا توجد معاينة مضمّنة.",
   "file_viewer_copy_install_command": "نسخ أمر التثبيت",
+  "file_viewer_copy_contents": "نسخ محتوى الملف",
+  "file_viewer_copy_failed": "تعذّر نسخ محتوى الملف",
   "file_viewer_discard_my_edits_and_reload": "تجاهل تعديلاتي وإعادة التحميل",
   "file_viewer_dismiss": "تجاهل",
   "file_viewer_dismiss_compile_message": "تجاهل رسالة التجميع",

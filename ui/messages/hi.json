@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "रोकना विफल:",
   "file_viewer_binary_file_no_inline_preview": "बाइनरी फ़ाइल — इनलाइन प्रीव्यू नहीं है।",
   "file_viewer_copy_install_command": "इंस्टॉल कमांड कॉपी करें",
+  "file_viewer_copy_contents": "फ़ाइल की सामग्री कॉपी करें",
+  "file_viewer_copy_failed": "फ़ाइल की सामग्री कॉपी नहीं हो सकी",
   "file_viewer_discard_my_edits_and_reload": "मेरे बदलाव छोड़ें और फिर से लोड करें",
   "file_viewer_dismiss": "खारिज करें",
   "file_viewer_dismiss_compile_message": "कंपाइल संदेश खारिज करें",

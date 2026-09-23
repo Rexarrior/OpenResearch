@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "Stop failed:",
   "file_viewer_binary_file_no_inline_preview": "Binary file — no inline preview.",
   "file_viewer_copy_install_command": "Copy install command",
+  "file_viewer_copy_contents": "Copy file contents",
+  "file_viewer_copy_failed": "Could not copy file contents",
   "file_viewer_discard_my_edits_and_reload": "Discard my edits and reload",
   "file_viewer_dismiss": "Dismiss",
   "file_viewer_dismiss_compile_message": "Dismiss compile message",

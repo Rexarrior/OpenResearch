@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "توقف ناموفق بود:",
   "file_viewer_binary_file_no_inline_preview": "فایل دودویی است — پیش‌نمایش درون‌خطی ندارد.",
   "file_viewer_copy_install_command": "کپی فرمان نصب",
+  "file_viewer_copy_contents": "کپی محتوای فایل",
+  "file_viewer_copy_failed": "کپی محتوای فایل ممکن نشد",
   "file_viewer_discard_my_edits_and_reload": "نادیده گرفتن ویرایش‌های من و بارگیری دوباره",
   "file_viewer_dismiss": "بستن",
   "file_viewer_dismiss_compile_message": "بستن پیام کامپایل",

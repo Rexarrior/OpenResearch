@@ -176,6 +176,8 @@
   "experiments_table_stop_failed": "停止失败：",
   "file_viewer_binary_file_no_inline_preview": "二进制文件——无法内嵌预览。",
   "file_viewer_copy_install_command": "复制安装命令",
+  "file_viewer_copy_contents": "复制文件内容",
+  "file_viewer_copy_failed": "无法复制文件内容",
   "file_viewer_discard_my_edits_and_reload": "放弃我的编辑并重新加载",
   "file_viewer_dismiss": "关闭",
   "file_viewer_dismiss_compile_message": "关闭编译消息",
