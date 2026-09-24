@@ -401,17 +401,18 @@ export function FileViewer({
   const canSelectContents = canCopyContents && !showingEditor && (!isHtml || showSource);
 
   const copyContents = async () => {
-    if (!canCopyContents || !data) return;
+    if (!data) return;
     try {
-      // A truncated preview contains only the first 512 KB. Fetch the raw file
-      // so the copy button always puts the complete text on the clipboard.
-      const content = showingEditor ? draft : data.truncated
-        ? await fetch(rawFileUrl(filePath)).then((response) => {
-            if (!response.ok) throw new Error(m.file_viewer_copy_failed());
-            return response.text();
-          })
-        : data.content;
-      await navigator.clipboard.writeText(content);
+      if (data.truncated && !showingEditor) {
+        // WebKit requires the clipboard write to start during the click.
+        const content = fetch(rawFileUrl(filePath)).then(async (response) => {
+          if (!response.ok) throw new Error();
+          return new Blob([await response.text()], { type: "text/plain" });
+        });
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": content })]);
+      } else {
+        await navigator.clipboard.writeText(showingEditor ? draft : data.content);
+      }
       setCopiedContents(true);
       window.setTimeout(() => setCopiedContents(false), 1500);
     } catch {
@@ -420,13 +421,11 @@ export function FileViewer({
   };
 
   const selectViewerContents = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.key.toLowerCase() !== "a") return;
-    const target = event.target;
-    if (target instanceof Element && target.closest("input, textarea, select, [contenteditable]")) return;
+    if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
     const content = selectableContentRef.current;
     if (!content) return;
     event.preventDefault();
-    event.stopPropagation();
     const range = document.createRange();
     range.selectNodeContents(content);
     const selection = window.getSelection();
@@ -564,7 +563,7 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view flex flex-col h-full min-h-0 min-w-0">
+    <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
       <div className="file-view-header flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
         <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
@@ -797,13 +796,6 @@ export function FileViewer({
         ref={bodyRef}
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
         tabIndex={canSelectContents ? 0 : undefined}
-        onPointerDown={(event) => {
-          if (!canSelectContents) return;
-          const target = event.target;
-          if (target instanceof Element && target.closest("a, button, input, textarea, select, iframe, [contenteditable], [role=button]")) return;
-          event.currentTarget.focus({ preventScroll: true });
-        }}
-        onKeyDown={selectViewerContents}
         onScroll={(event) => {
           const position = {
             top: Math.max(0, event.currentTarget.scrollTop),
