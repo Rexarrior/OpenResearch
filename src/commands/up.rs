@@ -788,9 +788,6 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
             | "/api/settings/data-dir/move"
-            | "/api/settings/ssh/master"
-            | "/api/settings/ssh/preflight"
-            | "/api/settings/ssh/connect"
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
             | "/api/settings/commands/run"
@@ -7700,9 +7697,6 @@ mod tests {
             "/api/update/restart",
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
-            "/api/settings/ssh/master",
-            "/api/settings/ssh/preflight",
-            "/api/settings/ssh/connect",
             "/api/settings/openresearch/login",
             "/api/settings/openresearch/ssh-key",
             "/api/settings/commands/run",
@@ -7713,6 +7707,9 @@ mod tests {
             assert!(remote_route_forbidden(path), "{path}");
         }
         assert!(!remote_route_forbidden("/api/settings/ssh/config"));
+        assert!(!remote_route_forbidden("/api/settings/ssh/master"));
+        assert!(!remote_route_forbidden("/api/settings/ssh/preflight"));
+        assert!(!remote_route_forbidden("/api/settings/ssh/connect"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
     }
 
