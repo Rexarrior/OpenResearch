@@ -566,9 +566,11 @@ impl Codex {
                 .await;
             info.supports_steering = !codex_exec_forced() && supported;
             if too_old {
-                info.agent_note = Some(
-                    "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
-                );
+                let legacy_note = "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.";
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(note) => format!("{note} {legacy_note}"),
+                    None => legacy_note.to_string(),
+                });
             }
         } else if info.install_broken {
             // Outranks both notes below: neither signing in nor a provider key

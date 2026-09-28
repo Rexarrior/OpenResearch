@@ -19,7 +19,8 @@ test("a recovery error replaces the identical terminal error without hiding othe
   const duplicate = { id: "err-0", type: "tool", tool: "error", state: { error: "Invalid model" } };
   const other = { id: "err-1", type: "tool", tool: "error", state: { error: "Other failure" } };
   const recovery = { id: "turn-recovery", type: "tool", tool: "error", state: { error: "Invalid model" } };
-  assert.deepEqual(withoutDuplicateTurnError([duplicate, other], recovery), [other]);
+  assert.deepEqual(withoutDuplicateTurnError([other, duplicate], recovery), [other]);
+  assert.deepEqual(withoutDuplicateTurnError([duplicate, other], recovery), [duplicate, other]);
   assert.deepEqual(withoutDuplicateTurnError([duplicate], undefined), [duplicate]);
 });
 
