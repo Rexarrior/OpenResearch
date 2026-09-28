@@ -5228,10 +5228,17 @@ impl ChatHost {
                 )
             }
         };
-        let reset_codex_model = overrides.clear_model
-            && session.model.is_some()
-            && session.native_session_id.is_some()
-            && session.harness == "codex";
+        let reset_codex_model = if overrides.clear_model && session.harness == "codex" {
+            match session.native_session_id.as_deref() {
+                Some(native_id) => {
+                    session.model.is_some()
+                        || store.chat_native_thread_has_named_model(session_id, native_id)?
+                }
+                None => false,
+            }
+        } else {
+            false
+        };
         if replace_settings {
             let plan_state = overrides.plan_mode.map(|plan_mode| {
                 let reset_pending = !plan_mode
