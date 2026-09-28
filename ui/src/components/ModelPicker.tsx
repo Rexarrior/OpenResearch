@@ -398,8 +398,7 @@ export function ModelPicker({
                       </div>
                     ) : (
                       <>
-                        {/* An empty catalog leaves model selection to the CLI. */}
-                        {harness.models.length === 0 && (
+                        {!filter.trim() && (
                           <MenuItem onClick={() => pick(harness, null)}>
                             <span>
                               {m.model_picker_default_model()}

@@ -2368,6 +2368,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
+    if ctx.reset_codex_model {
+        // Codex keeps the old thread model when a turn omits its model override.
+        append_native_recovery_context(ctx, &mut thread_setup);
+        ctx.native_session_id = None;
+    }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {

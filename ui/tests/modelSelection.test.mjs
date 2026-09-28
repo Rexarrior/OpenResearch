@@ -64,6 +64,10 @@ test("an empty catalog leaves CLI default and manual IDs selectable", () => {
   assert.equal(derive(selection("provider/new-model"), harness()).model, "provider/new-model");
 });
 
+test("CLI default clears a manual model even when discovery succeeds", () => {
+  assert.equal(derive(selection(null), harness("gpt-6-astra", "gpt-6-sol")).model, null);
+});
+
 test("catalog models still reconcile their model-specific settings", () => {
   const selected = selection("gpt-5.5");
   const result = derive(selected, harness("gpt-5.5"), {

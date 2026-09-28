@@ -5228,6 +5228,10 @@ impl ChatHost {
                 )
             }
         };
+        let reset_codex_model = overrides.clear_model
+            && session.model.is_some()
+            && session.native_session_id.is_some()
+            && session.harness == "codex";
         if replace_settings {
             let plan_state = overrides.plan_mode.map(|plan_mode| {
                 let reset_pending = !plan_mode
@@ -5456,7 +5460,7 @@ impl ChatHost {
             prepared_input: turn_text.clone(),
             settings_json: serde_json::to_string(&TurnOverrides {
                 model: session.model.clone(),
-                clear_model: false,
+                clear_model: reset_codex_model,
                 service_tier: session.service_tier.clone(),
                 permission_mode: session.permission_mode.clone(),
                 permission_revision: None,
@@ -6820,6 +6824,7 @@ pub struct TurnCtx {
     pub harness: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    pub reset_codex_model: bool,
     /// Codex processing tier for this turn (`default` or `priority`).
     pub service_tier: Option<String>,
     /// Effective permission mode for this turn (session value; harness applies
@@ -6874,6 +6879,8 @@ fn turn_ctx_from_stored(
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
         model: session.model.clone(),
+        reset_codex_model: serde_json::from_str::<TurnOverrides>(&turn.settings_json)
+            .is_ok_and(|settings| settings.clear_model),
         service_tier: session.service_tier.clone(),
         permission_mode: session
             .permission_mode
@@ -7130,6 +7137,7 @@ impl TurnCtx {
             harness: "test".into(),
             native_session_id: None,
             model: None,
+            reset_codex_model: false,
             service_tier: None,
             permission_mode: None,
             plan_mode: false,
