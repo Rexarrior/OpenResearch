@@ -120,6 +120,7 @@ import {
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
+  withoutDuplicateTurnError,
   partIsVisible,
   pendingQuestionId,
   partsTailToolId,
@@ -3102,7 +3103,10 @@ const Message = memo(function Message({
   }
   const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
   const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const regularParts = withoutDuplicateTurnError(
+    message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part))),
+    turnStatus,
+  );
   const copyText = predictTextTail && !message.completedAt ? "" : responseText(message);
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
