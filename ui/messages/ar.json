@@ -686,6 +686,7 @@
   "update_banner_restart_timed_out": "لم يعد OpenResearch المحدَّث في الوقت المناسب. أعد تشغيله يدويًا.",
   "model_picker_more": "نماذج إضافية: {count} — ابحث للعثور عليها",
   "model_picker_use_id": "استخدام «{id}» معرّفًا للنموذج",
+  "model_picker_unverified": "غير مُتحقَّق منه",
   "onboarding_sources_description": "متصل بـ alphaXiv وbioRxiv وOpenAlex وPubMed ليستند وكلاؤك إلى أحدث الأبحاث.",
   "skills_overview_description": "خصّص المهارات وقوالب LaTeX المتاحة عبر مشاريعك. ارفعها هنا، أو اطلب من وكيل OpenResearch إنشاءها وإضافتها لك.",
   "new_project_run_before_create": "نفّذ {command} قبل إنشاء المشروع.",

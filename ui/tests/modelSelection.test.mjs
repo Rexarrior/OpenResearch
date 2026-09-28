@@ -59,6 +59,11 @@ test("catalog refreshes do not replace an explicitly entered model id", () => {
   assert.equal(derive(custom, harness("different-model", "new-default")).model, custom.model);
 });
 
+test("an empty catalog leaves CLI default and manual IDs selectable", () => {
+  assert.equal(derive(selection(null), harness()).model, null);
+  assert.equal(derive(selection("provider/new-model"), harness()).model, "provider/new-model");
+});
+
 test("catalog models still reconcile their model-specific settings", () => {
   const selected = selection("gpt-5.5");
   const result = derive(selected, harness("gpt-5.5"), {

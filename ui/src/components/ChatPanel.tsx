@@ -4525,7 +4525,7 @@ export function ChatPanel({
   const rawSelection: ModelSelection | null = openSession
     ? {
       harness: openSession.harness,
-      model: sessionOverride.model ?? openSession.model,
+      model: sessionOverride.model !== undefined ? sessionOverride.model : openSession.model,
       serviceTier:
         sessionOverride.serviceTier !== undefined
           ? sessionOverride.serviceTier

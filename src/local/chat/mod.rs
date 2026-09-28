@@ -2557,7 +2557,8 @@ impl TurnSettings {
             sent.filter(|value| !value.is_empty())
                 .is_none_or(|value| running == Some(value))
         };
-        matches(overrides.model.as_deref(), self.model.as_deref())
+        (!overrides.clear_model || self.model.is_none())
+            && matches(overrides.model.as_deref(), self.model.as_deref())
             && matches(
                 overrides.service_tier.as_deref(),
                 self.service_tier.as_deref(),
@@ -5253,6 +5254,10 @@ impl ChatHost {
         }
         // Composer selections are sticky: an override that differs from the
         // stored value is persisted so the next turn (and a reload) keep it.
+        if overrides.clear_model && session.model.is_some() {
+            store.set_chat_session_model_value(&session.id, None)?;
+            session.model = None;
+        }
         if let Some(model) = overrides.model.filter(|m| !m.is_empty()) {
             if session.model.as_deref() != Some(model.as_str()) {
                 store.set_chat_session_model(&session.id, &model)?;
@@ -5451,6 +5456,7 @@ impl ChatHost {
             prepared_input: turn_text.clone(),
             settings_json: serde_json::to_string(&TurnOverrides {
                 model: session.model.clone(),
+                clear_model: false,
                 service_tier: session.service_tier.clone(),
                 permission_mode: session.permission_mode.clone(),
                 permission_revision: None,
@@ -6024,6 +6030,7 @@ impl ChatHost {
                 }
                 let overrides = TurnOverrides {
                     model: None,
+                    clear_model: false,
                     service_tier: None,
                     permission_mode: mode.and_then(|mode| {
                         crate::local::harness::permission_id_for_mode(&session.harness, mode)
@@ -6645,11 +6652,14 @@ impl ChatHost {
 // --- per-turn context handed to adapters --------------------------------------
 
 /// Composer selections a single message can override, mirroring the sticky
-/// per-session settings. Empty/None fields leave the stored value in place.
+/// per-session settings. Empty/None fields leave the stored value in place;
+/// `clear_model` explicitly selects the CLI default.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnOverrides {
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_model: bool,
     pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     #[serde(skip)]
@@ -6712,8 +6722,12 @@ fn turn_request_hash(
 
 impl TurnOverrides {
     fn apply_explicit(&mut self, next: &Self) {
-        if next.model.is_some() {
+        if next.clear_model {
+            self.model = None;
+            self.clear_model = true;
+        } else if next.model.is_some() {
             self.model.clone_from(&next.model);
+            self.clear_model = false;
         }
         if next.service_tier.is_some() {
             self.service_tier.clone_from(&next.service_tier);
@@ -9693,6 +9707,7 @@ mod bridge_tests {
     fn queued_overrides_keep_the_last_explicit_value_on_each_axis() {
         let first = TurnOverrides {
             model: Some("first-model".into()),
+            clear_model: false,
             service_tier: Some("priority".into()),
             permission_mode: Some("ask".into()),
             permission_revision: Some(1),
@@ -9702,6 +9717,7 @@ mod bridge_tests {
         };
         let second = TurnOverrides {
             model: Some("second-model".into()),
+            clear_model: false,
             service_tier: None,
             permission_mode: None,
             permission_revision: None,
@@ -9725,6 +9741,19 @@ mod bridge_tests {
         };
         merged.apply_explicit(&leave_plan);
         assert_eq!(merged.plan_mode, Some(false));
+
+        merged.apply_explicit(&TurnOverrides {
+            clear_model: true,
+            ..Default::default()
+        });
+        assert_eq!(merged.model, None);
+        assert!(merged.clear_model);
+        merged.apply_explicit(&TurnOverrides {
+            model: Some("new-model".into()),
+            ..Default::default()
+        });
+        assert_eq!(merged.model.as_deref(), Some("new-model"));
+        assert!(!merged.clear_model);
     }
 
     #[test]
@@ -10593,6 +10622,10 @@ mod steering_tests {
     #[test]
     fn a_changed_composer_setting_routes_to_the_queue() {
         for changed in [
+            TurnOverrides {
+                clear_model: true,
+                ..TurnOverrides::default()
+            },
             TurnOverrides {
                 model: Some("sonnet".into()),
                 ..TurnOverrides::default()

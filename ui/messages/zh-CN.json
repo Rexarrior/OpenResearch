@@ -681,6 +681,7 @@
   "update_banner_restart_timed_out": "更新后的 OpenResearch 未能及时恢复。请手动重新启动。",
   "model_picker_more": "还有 {count} 个——搜索即可查找",
   "model_picker_use_id": "使用“{id}”作为模型 ID",
+  "model_picker_unverified": "未经验证",
   "onboarding_sources_description": "已连接 alphaXiv、bioRxiv、OpenAlex 和 PubMed，让智能体以最新研究为依据。",
   "skills_overview_description": "自定义所有项目中可用的技能和 LaTeX 模板。在此上传，或让 OpenResearch 代理为您创建并添加。",
   "new_project_run_before_create": "创建项目前请运行 {command}。",
