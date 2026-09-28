@@ -81,7 +81,7 @@ enum Command {
     /// List a project's runs.
     Runs(RunsArgs),
 
-    /// Read a run's terminal log (tail by default).
+    /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
     /// Add an experiment node to a local `orx up` project.
@@ -241,15 +241,6 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
-    /// Read from the start instead of the tail.
-    #[arg(long)]
-    pub head: bool,
-    /// Max bytes to read.
-    #[arg(long)]
-    pub bytes: Option<String>,
-    /// Exact byte window `<start>:<end>`.
-    #[arg(long)]
-    pub range: Option<String>,
 }
 
 #[derive(Args, Debug)]
