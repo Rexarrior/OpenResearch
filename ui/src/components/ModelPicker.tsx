@@ -374,7 +374,7 @@ export function ModelPicker({
               <input
                 autoFocus
                 type="text"
-                placeholder={m.model_picker_search_models()}
+                placeholder={m.model_picker_search_or_enter_id()}
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               />
@@ -400,10 +400,7 @@ export function ModelPicker({
                       <>
                         {!filter.trim() && (
                           <MenuItem onClick={() => pick(harness, null)}>
-                            <span>
-                              {m.model_picker_default_model()}
-                              <span className="model-id">{m.model_picker_cli_configuration()}</span>
-                            </span>
+                            <span>{m.model_picker_default_model()}</span>
                             {value?.harness === harness.id && value?.model === null && (
                               <Check size={13} />
                             )}

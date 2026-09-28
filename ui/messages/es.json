@@ -219,6 +219,7 @@
   "model_picker_detecting_harnesses": "Detectando agentes…",
   "model_picker_fast_speed": "Modo rápido ·",
   "model_picker_search_models": "Buscar modelos…",
+  "model_picker_search_or_enter_id": "Buscar o introducir ID…",
   "model_picker_sessions_keep_their_harness_new_chat_to_switch": "Cada sesión mantiene su agente. Inicia un chat nuevo para cambiarlo.",
   "model_picker_unavailable": "No disponible",
   "new_project_form_blank_project": "Proyecto en blanco",

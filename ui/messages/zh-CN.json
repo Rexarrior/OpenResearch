@@ -219,6 +219,7 @@
   "model_picker_detecting_harnesses": "正在检测智能体工具…",
   "model_picker_fast_speed": "快速 ·",
   "model_picker_search_models": "搜索模型…",
+  "model_picker_search_or_enter_id": "搜索或输入模型 ID…",
   "model_picker_sessions_keep_their_harness_new_chat_to_switch": "会话将沿用当前的智能体工具。新建聊天即可切换。",
   "model_picker_unavailable": "不可用",
   "new_project_form_blank_project": "空白项目",
