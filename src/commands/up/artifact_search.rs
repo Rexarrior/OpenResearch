@@ -8,7 +8,7 @@ use std::time::Instant;
 // Background browser tabs may throttle heartbeats to once a minute.
 const LEASE: Duration = Duration::from_secs(5 * 60);
 const BUDGETS: [Option<Duration>; 3] = [
-    Some(Duration::from_secs(1)),
+    Some(Duration::from_secs(5)),
     Some(Duration::from_secs(15 * 60)),
     None,
 ];
@@ -225,6 +225,12 @@ mod tests {
     #[test]
     fn budgets_pause_resume_and_expire_instead_of_restarting() {
         let mut progress = Progress::new();
+        assert_eq!(
+            progress.deadline.unwrap().duration_since(progress.touched),
+            Duration::from_secs(5)
+        );
+        progress.tick(progress.touched + Duration::from_secs(4));
+        assert_eq!(progress.status, "running");
         assert!(!progress.resume());
         progress.tick(progress.deadline.unwrap());
         assert_eq!(progress.status, "paused");
