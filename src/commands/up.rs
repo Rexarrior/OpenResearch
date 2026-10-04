@@ -47,6 +47,7 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
+mod artifact_search;
 pub(crate) mod compute_settings;
 mod harness_setup;
 use compute_settings::*;
@@ -132,6 +133,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        artifact_searches: artifact_search::Searches::default(),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -360,6 +362,7 @@ async fn persistent_shutdown_signal() {
 
 #[derive(Clone)]
 struct AppState {
+    artifact_searches: artifact_search::Searches,
     agent: Arc<AgentHost>,
     chat: Arc<ChatHost>,
     claude: Arc<local::claude::ClaudeHost>,
@@ -558,7 +561,18 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/projects/{id}/file/location",
             get(project_file_location),
         )
-        .route("/api/projects/{id}/files/search", get(search_artifacts))
+        .route(
+            "/api/projects/{id}/files/search",
+            post(artifact_search::start),
+        )
+        .route(
+            "/api/projects/{id}/files/search/{search}",
+            get(artifact_search::status).delete(artifact_search::cancel),
+        )
+        .route(
+            "/api/projects/{id}/files/search/{search}/continue",
+            post(artifact_search::resume),
+        )
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
         .route(
@@ -4295,30 +4309,6 @@ async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
             .ok_or_else(|| not_found("project"))?;
         let listing = local::files::list(&project)?;
         Ok(Json(json!(listing)))
-    })
-    .await
-}
-
-#[derive(Deserialize)]
-struct ArtifactSearchQuery {
-    q: String,
-    after: Option<String>,
-}
-
-async fn search_artifacts(
-    Path(id): Path<String>,
-    Query(q): Query<ArtifactSearchQuery>,
-) -> ApiResult {
-    if q.q.len() > 1024 || q.after.as_ref().is_some_and(|s| s.len() > 4096) {
-        return Err(bad_request("search query is too long"));
-    }
-    blocking_api(move || {
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let result = local::files::search(&project, &q.q, q.after.as_deref())?;
-        Ok(Json(json!(result)))
     })
     .await
 }

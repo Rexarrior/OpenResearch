@@ -93,14 +93,22 @@ fn followed_metadata(
     canonical_base: &Path,
     entry: &std::fs::DirEntry,
 ) -> Option<std::fs::Metadata> {
-    let ft = entry.file_type().ok()?;
+    search_metadata(canonical_base, entry).ok().flatten()
+}
+
+// An excluded link is not an I/O failure. Keep that distinction for searches.
+fn search_metadata(
+    canonical_base: &Path,
+    entry: &std::fs::DirEntry,
+) -> std::io::Result<Option<std::fs::Metadata>> {
+    let ft = entry.file_type()?;
     if ft.is_symlink() {
-        if !resolves_inside(canonical_base, &entry.path()) {
-            return None;
+        if !crate::paths::canonicalize(entry.path())?.starts_with(canonical_base) {
+            return Ok(None);
         }
-        std::fs::metadata(entry.path()).ok()
+        std::fs::metadata(entry.path()).map(Some)
     } else {
-        entry.metadata().ok()
+        entry.metadata().map(Some)
     }
 }
 
@@ -315,7 +323,7 @@ pub struct ArtifactsListing {
     pub truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactSearch {
     pub entries: Vec<ArtifactEntry>,
@@ -329,109 +337,147 @@ const SEARCH_PAGE_SIZE: usize = 200;
 /// An on-demand filesystem search, independent of the cheap live-listing cap.
 /// Keep at most one page + a sentinel in memory; cursors are relative paths,
 /// not offsets into a truncated tree. No file contents are read.
-fn search_dir(base: &Path, query: &str, after: Option<&str>) -> ArtifactSearch {
-    struct Walk<'a> {
-        base: &'a Path,
-        query: &'a str,
-        after: Option<&'a str>,
-        hits: std::collections::BTreeMap<String, ArtifactEntry>,
-        ancestors: std::collections::HashSet<PathBuf>,
-        incomplete: bool,
-    }
-    impl Walk<'_> {
-        fn visit(&mut self, dir: &Path, prefix: &str) {
-            let canonical = match crate::paths::canonicalize(dir) {
-                Ok(p) if p.starts_with(self.base) => p,
-                _ => {
-                    self.incomplete = true;
-                    return;
-                }
-            };
-            // Track ancestors, not every visited directory: aliases may be valid
-            // paths in their own right, but a link back up must not recurse forever.
-            if !self.ancestors.insert(canonical.clone()) {
-                return;
-            }
-            match std::fs::read_dir(dir) {
-                Err(_) => self.incomplete = true,
-                Ok(entries) => {
-                    for result in entries {
-                        let entry = match result {
-                            Ok(e) => e,
-                            Err(_) => {
-                                self.incomplete = true;
-                                continue;
-                            }
-                        };
-                        let name = entry.file_name().to_string_lossy().into_owned();
-                        if is_ignored(&name) {
-                            continue;
-                        }
-                        let Some(md) = followed_metadata(self.base, &entry) else {
-                            continue;
-                        };
-                        let path = if prefix.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{prefix}/{name}")
-                        };
-                        if md.is_dir() {
-                            self.visit(&entry.path(), &path);
-                        } else if md.is_file()
-                            && path.to_lowercase().contains(self.query)
-                            && self.after.is_none_or(|after| path.as_str() > after)
-                        {
-                            self.hits.insert(
-                                path.clone(),
-                                ArtifactEntry {
-                                    name,
-                                    path: path.clone(),
-                                    is_dir: false,
-                                    size: md.len(),
-                                    modified_at: mtime_ms(&md),
-                                    presentation: Some(presentation_for_path(&path)),
-                                    children: Vec::new(),
-                                },
-                            );
-                            if self.hits.len() > SEARCH_PAGE_SIZE + 1 {
-                                self.hits.pop_last();
-                            }
-                        }
-                    }
-                }
-            }
-            self.ancestors.remove(&canonical);
+pub(crate) struct ArtifactSearchWalk {
+    base: PathBuf,
+    query: String,
+    after: Option<String>,
+    hits: std::collections::BTreeMap<String, ArtifactEntry>,
+    ancestors: std::collections::HashSet<PathBuf>,
+    stack: Vec<(std::fs::ReadDir, String, PathBuf)>,
+    started: bool,
+    incomplete: bool,
+}
+
+impl ArtifactSearchWalk {
+    pub(crate) fn new(base: PathBuf, query: String, after: Option<String>) -> Self {
+        Self {
+            base,
+            query: query.trim().to_lowercase(),
+            after,
+            hits: Default::default(),
+            ancestors: Default::default(),
+            stack: Vec::new(),
+            started: false,
+            incomplete: false,
         }
     }
-    let query = query.trim().to_lowercase();
-    let mut walk = Walk {
-        base,
-        query: &query,
-        after,
-        hits: Default::default(),
-        ancestors: Default::default(),
-        incomplete: false,
-    };
-    if !query.is_empty() {
-        walk.visit(base, "");
+
+    fn enter(&mut self, dir: &Path, prefix: String) {
+        let canonical = match crate::paths::canonicalize(dir) {
+            Ok(p) if p.starts_with(&self.base) => p,
+            _ => {
+                self.incomplete = true;
+                return;
+            }
+        };
+        // Only ancestors: valid aliases remain searchable, cycles do not.
+        if self.ancestors.contains(&canonical) {
+            return;
+        }
+        match std::fs::read_dir(dir) {
+            Ok(entries) => {
+                self.ancestors.insert(canonical.clone());
+                self.stack.push((entries, prefix, canonical));
+            }
+            Err(_) => self.incomplete = true,
+        }
     }
-    let has_more = walk.hits.len() > SEARCH_PAGE_SIZE;
-    let entries: Vec<_> = walk.hits.into_values().take(SEARCH_PAGE_SIZE).collect();
-    let next_cursor = if has_more {
-        entries.last().map(|e| e.path.clone())
-    } else {
-        None
-    };
-    ArtifactSearch {
-        entries,
-        next_cursor,
-        incomplete: walk.incomplete,
+
+    /// Stop between entries, retaining iterators and hits for a real resume.
+    /// A syscall already blocked inside the filesystem cannot be interrupted.
+    pub(crate) fn advance(&mut self, keep_running: impl Fn() -> bool) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        if !keep_running() {
+            return false;
+        }
+        if !self.started {
+            self.started = true;
+            self.enter(&self.base.clone(), String::new());
+        }
+        while !self.stack.is_empty() {
+            if !keep_running() {
+                return false;
+            }
+            let (entries, prefix, _) = self.stack.last_mut().unwrap();
+            let Some(entry) = entries.next() else {
+                let (_, _, canonical) = self.stack.pop().unwrap();
+                self.ancestors.remove(&canonical);
+                continue;
+            };
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    self.incomplete = true;
+                    continue;
+                }
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if is_ignored(&name) {
+                continue;
+            }
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            let md = match search_metadata(&self.base, &entry) {
+                Ok(Some(md)) => md,
+                Ok(None) => continue,
+                Err(_) => {
+                    self.incomplete = true;
+                    continue;
+                }
+            };
+            if md.is_dir() {
+                self.enter(&entry.path(), path);
+            } else if md.is_file()
+                && path.to_lowercase().contains(&self.query)
+                && self.after.as_ref().is_none_or(|after| &path > after)
+            {
+                self.hits.insert(
+                    path.clone(),
+                    ArtifactEntry {
+                        name,
+                        path: path.clone(),
+                        is_dir: false,
+                        size: md.len(),
+                        modified_at: mtime_ms(&md),
+                        presentation: Some(presentation_for_path(&path)),
+                        children: Vec::new(),
+                    },
+                );
+                if self.hits.len() > SEARCH_PAGE_SIZE + 1 {
+                    self.hits.pop_last();
+                }
+            }
+        }
+        true
+    }
+
+    pub(crate) fn finish(self) -> ArtifactSearch {
+        let has_more = self.hits.len() > SEARCH_PAGE_SIZE;
+        let entries: Vec<_> = self.hits.into_values().take(SEARCH_PAGE_SIZE).collect();
+        let next_cursor = if has_more {
+            entries.last().map(|e| e.path.clone())
+        } else {
+            None
+        };
+        ArtifactSearch {
+            entries,
+            next_cursor,
+            incomplete: self.incomplete,
+        }
     }
 }
 
-pub fn search(project: &LocalProject, query: &str, after: Option<&str>) -> Result<ArtifactSearch> {
-    let base = crate::paths::canonicalize(&ensure_dir(project)?)?;
-    Ok(search_dir(&base, query, after))
+#[cfg(test)]
+fn search_dir(base: &Path, query: &str, after: Option<&str>) -> ArtifactSearch {
+    let mut walk =
+        ArtifactSearchWalk::new(base.to_owned(), query.to_owned(), after.map(str::to_owned));
+    assert!(walk.advance(|| true));
+    walk.finish()
 }
 
 fn mtime_ms(md: &std::fs::Metadata) -> i64 {
@@ -640,6 +686,32 @@ mod tests {
     }
 
     #[test]
+    fn search_resumes_saved_iterators_and_reports_disappearing_metadata() {
+        let (root, base, _) = scratch();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(base.join(name), "x").unwrap();
+        }
+        let canonical = crate::paths::canonicalize(&base).unwrap();
+        let mut walk = ArtifactSearchWalk::new(canonical.clone(), ".txt".into(), None);
+        let steps = std::cell::Cell::new(0);
+        assert!(!walk.advance(|| {
+            steps.set(steps.get() + 1);
+            steps.get() <= 2
+        }));
+        assert_eq!(walk.hits.len(), 1);
+        // Removing an already visited file demonstrates this is not a rescan.
+        let visited = walk.hits.keys().next().unwrap().clone();
+        std::fs::remove_file(base.join(&visited)).unwrap();
+        assert!(!walk.advance(|| false));
+        assert!(walk.advance(|| true));
+        assert_eq!(walk.finish().entries.len(), 3);
+        let entry = std::fs::read_dir(&base).unwrap().next().unwrap().unwrap();
+        std::fs::remove_file(entry.path()).unwrap();
+        assert!(search_metadata(&canonical, &entry).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn search_paginates_without_duplicate_or_missing_matches() {
         let (root, base, _) = scratch();
         std::fs::create_dir(base.join("reports")).unwrap();
@@ -684,6 +756,8 @@ mod tests {
             ["alias/result.md", "reports/result.md"]
         );
         assert!(!result.incomplete);
+        symlink(base.join("missing"), base.join("broken")).unwrap();
+        assert!(search_dir(&canonical, "result", None).incomplete);
         let _ = std::fs::remove_dir_all(root);
     }
 

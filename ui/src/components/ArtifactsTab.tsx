@@ -1,7 +1,8 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
-import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { isCurrentScope, queryClient, workspaceScope } from "../queries/client";
-import { getArtifactFileTextQuery, getFileLocationQuery, searchArtifactsQuery } from "../queries/files";
+import { getArtifactFileTextQuery, getFileLocationQuery } from "../queries/files";
+import { useArtifactSearch } from "../useArtifactSearch";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -34,7 +35,7 @@ import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
-import { useFileVersion } from "../useFileVersion";
+import { useFileVersion, fileVersionQuery } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
 import {
   FileContextMenu,
@@ -545,9 +546,14 @@ export function ArtifactsTab({
     const timer = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
     return () => window.clearTimeout(timer);
   }, [searchDraft]);
-  const search = useInfiniteQuery({ ...searchArtifactsQuery(project.id, searchQuery), enabled: searchQuery.length > 0 });
-  const hits = useMemo(() => search.data?.pages.flatMap(page => page.entries) ?? [], [search.data]);
-  const entries = useMemo(() => withArtifactEntries(artifacts?.entries ?? [], selectedHit ? [selectedHit] : []), [artifacts?.entries, selectedHit]);
+  // Changing the draft cancels the old scan immediately, before the debounce.
+  const search = useArtifactSearch(project.id, searchQuery === searchDraft.trim() ? searchQuery : "");
+  const hits = useMemo(() => search.pages.flatMap(page => page.entries), [search.pages]);
+  // Share the preview's existing HEAD poll; absence from a capped tree proves nothing.
+  const hitVersion = useQuery({ ...fileVersionQuery(artifactUrl(project.id, selectedHit?.path ?? "")), enabled: !!selectedHit, subscribed: !!selectedHit });
+  const hitMissing = hitVersion.data === "missing" && !hitVersion.isFetching;
+  const liveHit = hitMissing ? null : selectedHit;
+  const entries = useMemo(() => withArtifactEntries(artifacts?.entries ?? [], liveHit ? [liveHit] : []), [artifacts?.entries, liveHit]);
   const searchActive = searchDraft.trim().length > 0;
   // Folders are open by default — including ones that appear later — so this
   // tracks what the user closed instead.
@@ -604,10 +610,15 @@ export function ArtifactsTab({
 
   // Clear a selection that vanished or became a directory on disk.
   useEffect(() => {
+    if (selectedHit && hitMissing) {
+      if (selected === selectedHit.path) setSelected(null);
+      setSelectedHit(null);
+      return;
+    }
     if (!selected || !artifacts) return;
     const entry = findArtifactEntry(entries, selected);
     if (!entry || entry.isDir) setSelected(null);
-  }, [selected, artifacts, entries]);
+  }, [selected, artifacts, entries, selectedHit, hitMissing]);
 
   const toggle = (path: string) =>
     setCollapsed((prev) => {
@@ -701,15 +712,26 @@ export function ArtifactsTab({
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {searchActive ? <>
-            {(searchQuery !== searchDraft.trim() || search.isPending) ? <LoadingRow><Spinner /> {m.artifacts_search_searching()}</LoadingRow> : <>
+            {(searchQuery !== searchDraft.trim() || search.pending) && <LoadingRow><Spinner /> {m.artifacts_search_searching()}</LoadingRow>}
+            {search.job?.status === "paused" && <div role="alert" className="px-3 py-2 text-sm text-accent-amber">
+              <p>{m.artifacts_search_slow()}</p>
+              <p>{search.job.stage === 0 ? m.artifacts_search_next_budget() : m.artifacts_search_unlimited_warning()}</p>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={search.resume}>{m.artifacts_search_continue()}</Button>
+                <Button onClick={search.cancel}>{m.artifacts_search_cancel()}</Button>
+              </div>
+            </div>}
+            {search.pending && search.job && <Button onClick={search.cancel}>{m.artifacts_search_cancel()}</Button>}
+            {search.job?.status === "cancelled" && <p role="status" className="m-0 px-3 py-2 text-sm text-subtext">{m.artifacts_search_cancelled()}</p>}
+            <>
               {search.error && <p role="alert" className="m-0 px-3 py-2 text-sm text-accent-red">{search.error.message}</p>}
-              {!search.error && hits.length === 0 && <p role="status" className="m-0 px-3 py-2 text-sm text-subtext">{m.artifacts_search_no_results()}</p>}
+              {search.job?.status === "complete" && hits.length === 0 && <p role="status" className="m-0 px-3 py-2 text-sm text-subtext">{m.artifacts_search_no_results()}</p>}
               {hits.map(hit => <button key={hit.path} type="button" className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-start text-sm text-text hover:bg-panel" title={hit.path} onClick={() => revealHit(hit)}>
                 <FileTypeIcon name={hit.name} /><span className="min-w-0 break-all">{hit.path}</span>
               </button>)}
-              {search.hasNextPage && <Button disabled={search.isFetchingNextPage} onClick={() => void search.fetchNextPage()}>{m.artifacts_search_load_more()}</Button>}
-              {search.data?.pages.some(page => page.incomplete) && <p role="status" className="m-0 px-3 py-2 text-sm text-accent-amber">{m.artifacts_search_incomplete()}</p>}
-            </>}
+              {search.job?.status === "complete" && search.pages.at(-1)?.nextCursor && <Button onClick={search.loadMore}>{m.artifacts_search_load_more()}</Button>}
+              {search.pages.some(page => page.incomplete) && <p role="status" className="m-0 px-3 py-2 text-sm text-accent-amber">{m.artifacts_search_incomplete()}</p>}
+            </>
           </> : entries.length ? tree(entries) : <WorkspaceEmptyState icon={Package} title={m.artifacts_tab_no_artifacts_yet()} description={m.artifacts_tab_this_is_the_project_s_durable_output_space()} />}
           {!searchActive && artifacts.truncated && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>

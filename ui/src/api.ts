@@ -568,8 +568,22 @@ export interface ArtifactSearch {
   nextCursor: string | null;
   incomplete: boolean;
 }
-export const searchArtifacts = (projectId: string, q: string, after?: string, signal?: AbortSignal) =>
-  get<ArtifactSearch>(`/api/projects/${projectId}/files/search?${new URLSearchParams({ q, ...(after ? { after } : {}) })}`, signal);
+export interface ArtifactSearchJob {
+  id: string;
+  status: "running" | "paused" | "complete" | "cancelled" | "failed";
+  stage: number;
+  result: ArtifactSearch | null;
+  error: string | null;
+}
+export const artifactSearchClient = (projectId: string) => {
+  const url = `/api/projects/${projectId}/files/search`;
+  return {
+    start: (q: string, after?: string) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q, after }) }).then(json<ArtifactSearchJob>),
+    status: (id: string) => get<ArtifactSearchJob>(`${url}/${id}`),
+    resume: (id: string) => fetch(`${url}/${id}/continue`, { method: "POST" }).then(json<ArtifactSearchJob>),
+    cancel: (id: string) => fetch(`${url}/${id}`, { method: "DELETE" }).then(json<{ ok: boolean }>),
+  };
+};
 
 export interface LatexEngine {
   /** The engine that will run, or null when the machine has none. */
