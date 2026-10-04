@@ -1267,5 +1267,14 @@
   "window_minimize": "Minimizar",
   "window_maximize": "Maximizar",
   "window_restore": "Restaurar",
-  "window_close": "Cerrar"
+  "window_close": "Cerrar",
+  "file_actions_open_in_panel": "Abrir en el panel derecho",
+  "file_actions_copy_absolute_path": "Copiar ruta absoluta",
+  "file_actions_resolving": "Resolviendo la ubicación del archivo…",
+  "file_actions_remote_path": "Ruta remota: {path}",
+  "artifacts_search_placeholder": "Buscar artefactos por nombre o ruta",
+  "artifacts_search_searching": "Buscando…",
+  "artifacts_search_no_results": "No hay artefactos coincidentes",
+  "artifacts_search_load_more": "Cargar más resultados",
+  "artifacts_search_incomplete": "No se pudieron buscar algunas carpetas. Los resultados pueden estar incompletos."
 }

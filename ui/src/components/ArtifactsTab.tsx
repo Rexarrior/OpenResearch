@@ -1,7 +1,7 @@
 import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
-import { useQuery } from "@tanstack/react-query";
-import { queryClient } from "../queries/client";
-import { getArtifactFileTextQuery } from "../queries/files";
+import { useQuery, useInfiniteQuery } from "@tanstack/react-query";
+import { isCurrentScope, queryClient, workspaceScope } from "../queries/client";
+import { getArtifactFileTextQuery, getFileLocationQuery, searchArtifactsQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -13,7 +13,7 @@ import {
   Package,
   Trash2,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -24,6 +24,7 @@ import {
   FILE_PREVIEW_BYTES,
   fmtBytes,
   manageArtifactFile,
+  revealFileInManager,
   type ArtifactEntry,
   type Project,
   type ProjectArtifacts,
@@ -38,12 +39,15 @@ import { mdCodeComponents, remarkMathOptions } from "./Md";
 import {
   FileContextMenu,
   FileRenameInput,
-  copyFilePath,
+  copyAbsoluteFilePath,
   fileContextMenuTarget,
   type FileContextMenuEvent,
   type FileContextMenuTarget,
 } from "./FileTreeActions";
 import { IconButton, IconButtonLink, LoadingRow, showAlert, Spinner } from "./ui";
+import { Input, Button } from "./ui";
+import { FilePathDetails } from "./FilePathDetails";
+import { withArtifactEntries } from "../fileLocation";
 
 /** Any href with a URI scheme (https:, mailto:, data:, …) or a
  * protocol-relative // — i.e. not an artifact-relative path to resolve. */
@@ -239,11 +243,13 @@ function PreviewPane({
   entry,
   onDelete,
   artifactEntries,
+  remote,
 }: {
   projectId: string;
   entry: ArtifactEntry;
   onDelete: (path: string) => void;
   artifactEntries: ArtifactEntry[];
+  remote: boolean;
 }) {
   const kind = previewKind(entry);
   const version = useFileVersion(artifactUrl(projectId, entry.path));
@@ -346,6 +352,7 @@ function PreviewPane({
           <Trash2 size={13} />
         </IconButton>
       </div>
+      <FilePathDetails projectId={projectId} request={{ path: entry.path, source: "artifacts" }} remote={remote} />
       <div className={`fpreview-body flex-1 min-h-0 overflow-auto [&.doc]:pt-4.5 [&.doc]:px-7 [&.doc]:pb-12 [&.doc_.artifact-md]:max-w-readable [&.doc_.artifact-md]:my-0 [&.doc_.artifact-md]:mx-auto ${isDoc && !showSource ? "doc" : ""}`}>
         {body}
         {truncated && (
@@ -393,13 +400,18 @@ function TreeRows({
           const open = !collapsed.has(e.path);
           return (
             <div key={e.path} className="min-w-0 max-w-full">
-              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
+              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)} onContextMenu={event => { event.preventDefault(); onContextMenu(event, e.path); }}>
                 <button
                   className="file-tree-chevron text-muted shrink-0 [button&]:inline-flex [button&]:items-center [button&]:justify-center [button&]:w-[13px] [button&]:h-[13px] [button&]:p-0 [button&]:border-0 [button&]:bg-transparent [button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90"
                   aria-label={open ? m.artifact_collapse_folder({ name: ltr(e.name) }) : m.artifact_expand_folder({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     onToggle(e.path);
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+                      event.preventDefault(); onContextMenu(event, e.path);
+                    }
                   }}
                 >
                   <ChevronRight size={13} className={open ? "open" : ""} />
@@ -460,6 +472,7 @@ function TreeRows({
           <button
             key={e.path}
             type="button"
+            data-artifact-path={e.path}
             className={`file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100 ${selected === e.path ? "selected" : ""}`}
             style={indent}
             title={m.a11y_artifact_preview({ path: ltr(e.path) })}
@@ -515,13 +528,27 @@ export function ArtifactsTab({
   artifacts,
   onOpenFile,
   canRenameFile,
+  remote,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
+  remote: boolean;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedHit, setSelectedHit] = useState<ArtifactEntry | null>(null);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [revealNonce, setRevealNonce] = useState(0);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [searchDraft]);
+  const search = useInfiniteQuery({ ...searchArtifactsQuery(project.id, searchQuery), enabled: searchQuery.length > 0 });
+  const hits = useMemo(() => search.data?.pages.flatMap(page => page.entries) ?? [], [search.data]);
+  const entries = useMemo(() => withArtifactEntries(artifacts?.entries ?? [], selectedHit ? [selectedHit] : []), [artifacts?.entries, selectedHit]);
+  const searchActive = searchDraft.trim().length > 0;
   // Folders are open by default — including ones that appear later — so this
   // tracks what the user closed instead.
   const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(project.id));
@@ -529,6 +556,11 @@ export function ArtifactsTab({
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
   const treeRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!selected || searchActive || !revealNonce) return;
+    const row = treeRef.current?.querySelector<HTMLElement>(`[data-artifact-path="${CSS.escape(selected)}"]`);
+    row?.scrollIntoView({ block: "nearest" });
+  }, [selected, searchActive, revealNonce, entries]);
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -573,9 +605,9 @@ export function ArtifactsTab({
   // Clear a selection that vanished or became a directory on disk.
   useEffect(() => {
     if (!selected || !artifacts) return;
-    const entry = findArtifactEntry(artifacts.entries, selected);
+    const entry = findArtifactEntry(entries, selected);
     if (!entry || entry.isDir) setSelected(null);
-  }, [selected, artifacts]);
+  }, [selected, artifacts, entries]);
 
   const toggle = (path: string) =>
     setCollapsed((prev) => {
@@ -587,6 +619,7 @@ export function ArtifactsTab({
 
   const remove = (path: string) => {
     if (selected === path || selected?.startsWith(path + "/")) setSelected(null);
+    if (selectedHit?.path === path || selectedHit?.path.startsWith(path + "/")) setSelectedHit(null);
     void deleteArtifact(project.id, path)
       .catch(() => {});
   };
@@ -598,13 +631,19 @@ export function ArtifactsTab({
     try {
       await manageArtifactFile(project.id, path, action);
       if (action.action === "rename" && selected === path) setSelected(null);
+      if (action.action === "rename" && (selectedHit?.path === path || selectedHit?.path.startsWith(path + "/"))) setSelectedHit(null);
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
   };
 
   const copyPath = (path: string) => {
-    if (artifacts) copyFilePath(artifacts.dir, path);
+    const scope = workspaceScope();
+    copyAbsoluteFilePath(queryClient.fetchQuery(getFileLocationQuery(project.id, { path, source: "artifacts" }))
+      .then(location => {
+        if (!isCurrentScope(scope) || !location.absolutePath) throw new Error(m.file_viewer_not_found());
+        return location.absolutePath;
+      }));
   };
 
   if (!artifacts) {
@@ -638,25 +677,41 @@ export function ArtifactsTab({
       onCancelRename={() => setRenamingPath(null)}
     />
   );
-  const selectedEntry = selected ? findArtifactEntry(artifacts.entries, selected) : null;
-
-  if (artifacts.entries.length === 0) {
-    return (
-      <WorkspaceEmptyState
-        icon={Package}
-        title={m.artifacts_tab_no_artifacts_yet()}
-        description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
-      />
-    );
-  }
+  const selectedEntry = selected ? findArtifactEntry(entries, selected) : null;
+  const revealHit = (hit: ArtifactEntry) => {
+    setSelectedHit(hit);
+    setSelected(hit.path);
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      const segments = hit.path.split("/");
+      for (let i = 1; i < segments.length; i++) next.delete(segments.slice(0, i).join("/"));
+      return next;
+    });
+    setSearchDraft("");
+    setRevealNonce(n => n + 1);
+  };
 
   return (
     <div className="files-tab h-full min-h-0 flex bg-background @container">
       <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background [@container((max-width:_720px))]:!w-full" ref={treeRef} style={{ width: treeWidth }}>
+        <FilePathDetails projectId={project.id} request={{ path: "", source: "artifacts" }} remote={remote} />
+        <div className="shrink-0 p-2">
+          <Input aria-label={m.artifacts_search_placeholder()} placeholder={m.artifacts_search_placeholder()} value={searchDraft} onChange={event => setSearchDraft(event.target.value)} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setSearchDraft(""); } }} />
+        </div>
         <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover [@container((max-width:_720px))]:hidden" onPointerDown={resizeTree} />
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
-          {tree(artifacts.entries)}
-          {artifacts.truncated && (
+          {searchActive ? <>
+            {(searchQuery !== searchDraft.trim() || search.isPending) ? <LoadingRow><Spinner /> {m.artifacts_search_searching()}</LoadingRow> : <>
+              {search.error && <p role="alert" className="m-0 px-3 py-2 text-sm text-accent-red">{search.error.message}</p>}
+              {!search.error && hits.length === 0 && <p role="status" className="m-0 px-3 py-2 text-sm text-subtext">{m.artifacts_search_no_results()}</p>}
+              {hits.map(hit => <button key={hit.path} type="button" className="flex w-full min-w-0 items-center gap-2 px-3 py-2 text-start text-sm text-text hover:bg-panel" title={hit.path} onClick={() => revealHit(hit)}>
+                <FileTypeIcon name={hit.name} /><span className="min-w-0 break-all">{hit.path}</span>
+              </button>)}
+              {search.hasNextPage && <Button disabled={search.isFetchingNextPage} onClick={() => void search.fetchNextPage()}>{m.artifacts_search_load_more()}</Button>}
+              {search.data?.pages.some(page => page.incomplete) && <p role="status" className="m-0 px-3 py-2 text-sm text-accent-amber">{m.artifacts_search_incomplete()}</p>}
+            </>}
+          </> : entries.length ? tree(entries) : <WorkspaceEmptyState icon={Package} title={m.artifacts_tab_no_artifacts_yet()} description={m.artifacts_tab_this_is_the_project_s_durable_output_space()} />}
+          {!searchActive && artifacts.truncated && (
             <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
           )}
         </div>
@@ -669,7 +724,8 @@ export function ArtifactsTab({
           projectId={project.id}
           entry={selectedEntry}
           onDelete={remove}
-          artifactEntries={artifacts.entries}
+          artifactEntries={entries}
+          remote={remote}
         />
       ) : (
         <div className="fpreview flex-1 min-w-0 flex flex-col min-h-0 bg-background fpreview-none items-center justify-center gap-2 text-sm text-muted [@container((max-width:_720px))]:hidden">
@@ -680,7 +736,8 @@ export function ArtifactsTab({
       {contextMenu && (
         <FileContextMenu
           target={contextMenu}
-          onOpen={() => onOpenFile(contextMenu.path)}
+          onOpen={findArtifactEntry(entries, contextMenu.path)?.isDir ? undefined : () => onOpenFile(contextMenu.path)}
+          onReveal={remote ? undefined : () => { void revealFileInManager(project.id, contextMenu.path, { source: "artifacts" }).catch(e => showAlert(e instanceof Error ? e.message : String(e), "error")); }}
           onRename={canRenameFile(contextMenu.path) ? () => setRenamingPath(contextMenu.path) : undefined}
           onDuplicate={() => void manage(contextMenu.path, { action: "duplicate" })}
           onCopyPath={() => copyPath(contextMenu.path)}

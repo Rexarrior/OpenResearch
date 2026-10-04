@@ -545,12 +545,31 @@ export const openFileInEditor = (
 export const revealFileInManager = (
   projectId: string,
   path: string,
-  opts: { sessionId?: string } = {},
+  opts: { sessionId?: string; source?: "repo" | "artifacts" | "abs"; ref?: string } = {},
 ) =>
   post<{ ok: boolean }>(`/api/projects/${projectId}/file/reveal`, {
     path,
-    sessionId: opts.sessionId,
+    ...opts,
   });
+
+export interface FileLocationRequest extends CheckoutRef {
+  path: string;
+  source: "repo" | "artifacts" | "abs";
+}
+export interface FileLocation {
+  absolutePath: string | null;
+  isDir: boolean;
+}
+export const getFileLocation = (projectId: string, request: FileLocationRequest, signal?: AbortSignal) =>
+  get<FileLocation>(`/api/projects/${projectId}/file/location?${checkoutQuery(request, new URLSearchParams({ path: request.path, source: request.source }))}`, signal);
+
+export interface ArtifactSearch {
+  entries: ArtifactEntry[];
+  nextCursor: string | null;
+  incomplete: boolean;
+}
+export const searchArtifacts = (projectId: string, q: string, after?: string, signal?: AbortSignal) =>
+  get<ArtifactSearch>(`/api/projects/${projectId}/files/search?${new URLSearchParams({ q, ...(after ? { after } : {}) })}`, signal);
 
 export interface LatexEngine {
   /** The engine that will run, or null when the machine has none. */

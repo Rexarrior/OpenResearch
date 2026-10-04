@@ -1267,5 +1267,14 @@
   "window_minimize": "छोटा करें",
   "window_maximize": "बड़ा करें",
   "window_restore": "पुनर्स्थापित करें",
-  "window_close": "बंद करें"
+  "window_close": "बंद करें",
+  "file_actions_open_in_panel": "दाएँ पैनल में खोलें",
+  "file_actions_copy_absolute_path": "पूर्ण पथ कॉपी करें",
+  "file_actions_resolving": "फ़ाइल का स्थान खोजा जा रहा है…",
+  "file_actions_remote_path": "दूरस्थ पथ: {path}",
+  "artifacts_search_placeholder": "नाम या पथ से आर्टिफ़ैक्ट खोजें",
+  "artifacts_search_searching": "खोज रहे हैं…",
+  "artifacts_search_no_results": "कोई मेल खाता आर्टिफ़ैक्ट नहीं मिला",
+  "artifacts_search_load_more": "और परिणाम लोड करें",
+  "artifacts_search_incomplete": "कुछ फ़ोल्डरों में खोज नहीं हो सकी। परिणाम अधूरे हो सकते हैं।"
 }

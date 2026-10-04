@@ -554,6 +554,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
         .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
+        .route(
+            "/api/projects/{id}/file/location",
+            get(project_file_location),
+        )
+        .route("/api/projects/{id}/files/search", get(search_artifacts))
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
         .route(
@@ -3378,9 +3383,78 @@ async fn write_project_file(
 struct OpenProjectFileReq {
     path: String,
     session_id: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    r#ref: Option<String>,
+}
+
+/// Resolve only the source that answered the preview, never a second fallback.
+/// The caller passes the reader's resolved path/root; Git blobs have no disk path.
+fn file_location_path(id: &str, req: &OpenProjectFileReq) -> Result<std::path::PathBuf, ApiError> {
+    if req.r#ref.as_deref().is_some_and(|r| !r.is_empty()) {
+        return Err(bad_request(
+            "committed versions have no current filesystem path",
+        ));
+    }
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(id)?
+        .ok_or_else(|| not_found("project"))?;
+    match req.source.as_deref().unwrap_or("repo") {
+        "repo" => confined_checkout_file(id, req, "reveal"),
+        "artifacts" => {
+            if req.path.is_empty() {
+                return crate::paths::canonicalize(&local::files::ensure_dir(&project)?)
+                    .map_err(|e| ApiError::from(anyhow!("artifacts unavailable: {e}")));
+            }
+            local::files::file_path(&project, &req.path).map_err(bad_request)
+        }
+        "abs" => {
+            let (_, path) = validated_absolute_file_path(&req.path)?;
+            crate::paths::canonicalize(&path).map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => not_found("file"),
+                _ => ApiError::from(anyhow!("file unavailable: {e}")),
+            })
+        }
+        _ => Err(bad_request("invalid file source")),
+    }
+}
+
+async fn project_file_location(
+    Path(id): Path<String>,
+    Query(req): Query<OpenProjectFileReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        if req.r#ref.as_deref().is_some_and(|r| !r.is_empty()) {
+            // A ref is provenance, not permission to reveal an unrelated live copy.
+            return Ok(Json(json!({ "absolutePath": null, "isDir": false })));
+        }
+        let full = file_location_path(&id, &req)?;
+        Ok(Json(
+            json!({ "absolutePath": full.to_string_lossy(), "isDir": full.is_dir() }),
+        ))
+    })
+    .await
 }
 
 /// Canonical path of a checkout-relative file, confined to the checkout root.
+fn ensure_selected_worktree(req: &OpenProjectFileReq, root_kind: &str) -> Result<(), ApiError> {
+    // New source-aware callers already resolved a preview. A supplied session
+    // therefore names that worktree, not permission to fall back after it vanishes.
+    // Legacy callers omit source and retain their existing clone fallback.
+    if req.source.as_deref() == Some("repo")
+        && req
+            .session_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        && root_kind != "worktree"
+    {
+        return Err(not_found("session worktree"));
+    }
+    Ok(())
+}
+
 fn confined_checkout_file(
     id: &str,
     req: &OpenProjectFileReq,
@@ -3394,7 +3468,8 @@ fn confined_checkout_file(
     let project = store
         .get_local_project(id)?
         .ok_or_else(|| not_found("project"))?;
-    let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+    let (root, root_kind) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+    ensure_selected_worktree(req, root_kind)?;
     let full = match crate::paths::canonicalize(root.join(&rel_path)) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
@@ -3431,7 +3506,7 @@ async fn reveal_project_file(
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let full = confined_checkout_file(&id, &req, "reveal")?;
+        let full = file_location_path(&id, &req)?;
         crate::editors::reveal_in_file_manager(&full)
             .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
@@ -4220,6 +4295,30 @@ async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
             .ok_or_else(|| not_found("project"))?;
         let listing = local::files::list(&project)?;
         Ok(Json(json!(listing)))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ArtifactSearchQuery {
+    q: String,
+    after: Option<String>,
+}
+
+async fn search_artifacts(
+    Path(id): Path<String>,
+    Query(q): Query<ArtifactSearchQuery>,
+) -> ApiResult {
+    if q.q.len() > 1024 || q.after.as_ref().is_some_and(|s| s.len() > 4096) {
+        return Err(bad_request("search query is too long"));
+    }
+    blocking_api(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let result = local::files::search(&project, &q.q, q.after.as_deref())?;
+        Ok(Json(json!(result)))
     })
     .await
 }
@@ -7988,6 +8087,26 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolved_os_actions_do_not_fall_back_after_a_worktree_disappears() {
+        let request: super::OpenProjectFileReq = serde_json::from_value(serde_json::json!({
+            "path": "report.md", "source": "repo", "sessionId": "chat"
+        }))
+        .unwrap();
+        assert!(super::ensure_selected_worktree(&request, "clone").is_err());
+        assert!(super::ensure_selected_worktree(&request, "worktree").is_ok());
+        let clone: super::OpenProjectFileReq = serde_json::from_value(serde_json::json!({
+            "path": "report.md", "source": "repo"
+        }))
+        .unwrap();
+        assert!(super::ensure_selected_worktree(&clone, "clone").is_ok());
+        let legacy: super::OpenProjectFileReq = serde_json::from_value(serde_json::json!({
+            "path": "report.md", "sessionId": "pruned"
+        }))
+        .unwrap();
+        assert!(super::ensure_selected_worktree(&legacy, "clone").is_ok());
+    }
+
     use super::*;
 
     #[test]

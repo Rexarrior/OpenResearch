@@ -1,5 +1,5 @@
 import { isCommit } from "./invalidation";
-import { queryOptions, type FetchQueryOptions } from "@tanstack/react-query";
+import { queryOptions, infiniteQueryOptions, type FetchQueryOptions } from "@tanstack/react-query";
 import * as api from "../api";
 import { workspaceKey, queryClient } from "./client";
 
@@ -47,6 +47,20 @@ export const getArtifactsQuery = (projectId: string) => queryOptions({
   queryKey: workspaceKey("getArtifacts", projectId),
   queryFn: ({ signal }) => api.getArtifacts(projectId, signal),
   staleTime: 30_000,
+});
+
+export const getFileLocationQuery = (projectId: string, request: api.FileLocationRequest) => queryOptions({
+  queryKey: workspaceKey("getFileLocation", projectId, request),
+  queryFn: ({ signal }) => api.getFileLocation(projectId, request, signal),
+  staleTime: 0,
+});
+
+export const searchArtifactsQuery = (projectId: string, q: string) => infiniteQueryOptions({
+  queryKey: workspaceKey("searchArtifacts", projectId, q),
+  queryFn: ({ signal, pageParam }) => api.searchArtifacts(projectId, q, pageParam, signal),
+  initialPageParam: undefined as string | undefined,
+  getNextPageParam: page => page.nextCursor ?? undefined,
+  staleTime: 5_000,
 });
 
 export const getArtifactFileTextQuery = (projectId: string, path: string) => queryOptions({

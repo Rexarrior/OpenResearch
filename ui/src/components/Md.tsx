@@ -25,6 +25,7 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { chatImageTarget, firstCitedLine, rehypeSafeUrls, splitLineSuffix } from "../markdownTarget";
+import { FileActionScope, FileLinkMenu, useFileLinkMenu } from "./FileLinkActions";
 
 const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
 
@@ -42,7 +43,8 @@ export function ChatImageScope({ projectId, sessionId, children }: {
       : projectFileUrl(projectId, target.source === "artifact" ? `artifacts/${target.path}` : target.path, { sessionId: sessionId ?? undefined });
     return url + target.hash;
   }, [projectId, sessionId]);
-  return <ImageResolverContext value={resolver}>{children}</ImageResolverContext>;
+  const fileScope = useMemo(() => ({ sessionId: sessionId ?? undefined }), [sessionId]);
+  return <ImageResolverContext value={resolver}><FileActionScope value={fileScope}>{children}</FileActionScope></ImageResolverContext>;
 }
 
 function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
@@ -286,19 +288,27 @@ function FileChip({
 }) {
   const name = path.split("/").pop() || path;
   const label = line != null ? `${name}:${line}` : name;
+  const actions = useFileLinkMenu(path, exp);
+  const gestures = tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile?.(path, line, exp, undefined, intent));
   return (
+    <>
     <button
       className="file-chip"
       title={onOpenFile ? m.a11y_open_file_in_panel({ path: ltr(path) }) : path}
-      {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-        onOpenFile?.(path, line, exp, undefined, intent),
-      )}
+      {...gestures}
+      {...actions.handlers}
+      onKeyDown={event => {
+        actions.handlers.onKeyDown?.(event);
+        if (!event.defaultPrevented) gestures.onKeyDown(event);
+      }}
       disabled={!onOpenFile}
     >
       <FileCode size={12} />
       <span className="file-chip-label">{label}</span>
       <PanelRight className="file-chip-open" size={12} aria-hidden="true" />
     </button>
+    {actions.menu && <FileLinkMenu {...actions.menu} onOpen={() => onOpenFile?.(path, line, exp, undefined, "keepOpen")} />}
+    </>
   );
 }
 

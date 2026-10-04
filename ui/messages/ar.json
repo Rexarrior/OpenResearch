@@ -1267,5 +1267,14 @@
   "window_minimize": "تصغير",
   "window_maximize": "تكبير",
   "window_restore": "استعادة",
-  "window_close": "إغلاق"
+  "window_close": "إغلاق",
+  "file_actions_open_in_panel": "فتح في اللوحة اليمنى",
+  "file_actions_copy_absolute_path": "نسخ المسار المطلق",
+  "file_actions_resolving": "جارٍ تحديد موقع الملف…",
+  "file_actions_remote_path": "المسار البعيد: {path}",
+  "artifacts_search_placeholder": "البحث في الملفات حسب الاسم أو المسار",
+  "artifacts_search_searching": "جارٍ البحث…",
+  "artifacts_search_no_results": "لا توجد ملفات مطابقة",
+  "artifacts_search_load_more": "تحميل المزيد من النتائج",
+  "artifacts_search_incomplete": "تعذر البحث في بعض المجلدات. قد تكون النتائج غير مكتملة."
 }
