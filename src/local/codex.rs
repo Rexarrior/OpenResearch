@@ -803,67 +803,102 @@ impl CodexHost {
     /// future would drop its `Arc` while the reader task keeps the child alive
     /// — an unregistered client would be unreachable by every kill path and
     /// leak the process for the rest of `orx up`'s life. Detached, the
-    /// bring-up always runs to completion: the client ends up registered
-    /// (killable via kill_session/shutdown) or killed on handshake failure.
-    /// One consequence of registering before the handshake: a reuse hit may
-    /// briefly hand out a still-mid-handshake client; its requests fail
-    /// cleanly (server "not initialized" / closed) and the next turn recovers.
+    /// bring-up always runs to completion. A cancelled caller's newly spawned
+    /// child is retired, even if cancellation preceded registration. The task
+    /// holds the spawn lock until ownership is handed off (or cleanup finishes),
+    /// so a successor cannot reuse an abandoned, mid-handshake child.
     pub async fn ensure(
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
     ) -> Result<Arc<CodexClient>> {
-        let _spawning = self.spawn_lock.lock().await;
-        {
-            let mut guard = self.inner.lock().await;
-            if let Some(client) = guard.get(session_id) {
-                if client.native_store() == native_store
-                    && matches!(client.child.lock().await.try_wait(), Ok(None))
-                {
-                    client.touch();
-                    return Ok(client.clone());
-                }
-            }
-            if let Some(stale) = guard.remove(session_id) {
-                stale.terminate().await;
-            }
-        }
         let host = self.clone();
         let session = session_id.to_string();
+        self.ensure_with_spawn(session_id, native_store, async move {
+            spawn_client(&session, host.up_port.get().copied(), native_store).await
+        })
+        .await
+    }
+
+    async fn ensure_with_spawn(
+        self: &Arc<Self>,
+        session_id: &str,
+        native_store: NativeStore,
+        spawn: impl std::future::Future<Output = Result<Arc<CodexClient>>> + Send + 'static,
+    ) -> Result<Arc<CodexClient>> {
+        let host = self.clone();
+        let session = session_id.to_string();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (accepted_tx, mut accepted_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let client = spawn_client(&session, host.up_port.get().copied(), native_store).await?;
-            // Never displace a live entry: if an abandoned bring-up's insert
-            // races a successor's (spawn_lock was released by the abort), the
-            // loser kills its own child and defers to the live one.
+            let _spawning = host.spawn_lock.lock().await;
+            if ready_tx.is_closed() {
+                return;
+            }
             {
                 let mut guard = host.inner.lock().await;
                 if let Some(existing) = guard.get(&session) {
                     if existing.native_store() == native_store
                         && matches!(existing.child.lock().await.try_wait(), Ok(None))
                     {
-                        let existing = existing.clone();
-                        drop(guard);
-                        client.terminate().await;
-                        return Ok(existing);
+                        existing.touch();
+                        let _ = ready_tx.send(Ok(existing.clone()));
+                        return;
                     }
                 }
                 if let Some(stale) = guard.remove(&session) {
                     stale.terminate().await;
                 }
-                guard.insert(session.clone(), client.clone());
             }
-            if let Err(e) = handshake(&client).await {
-                client.terminate().await;
-                let mut guard = host.inner.lock().await;
-                if guard.get(&session).is_some_and(|c| Arc::ptr_eq(c, &client)) {
-                    guard.remove(&session);
+            // Do not abort spawn: it may be awaiting blocking config work or
+            // have already launched a child that must remain reachable.
+            let client = match spawn.await {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
                 }
-                return Err(e);
+            };
+            if ready_tx.is_closed() {
+                client.terminate().await;
+                return;
             }
-            Ok(client)
-        })
-        .await
-        .map_err(|e| anyhow!("codex app-server bring-up task failed: {e}"))?
+            host.inner
+                .lock()
+                .await
+                .insert(session.clone(), client.clone());
+            let initialized = tokio::select! {
+                result = handshake(&client) => result,
+                _ = &mut accepted_rx => Err(anyhow!("Codex startup was cancelled")),
+            };
+            if let Err(error) = initialized {
+                host.retire_client(&session, &client).await;
+                let _ = ready_tx.send(Err(error));
+                return;
+            }
+            if ready_tx.send(Ok(client.clone())).is_err() || accepted_rx.await.is_err() {
+                host.retire_client(&session, &client).await;
+            }
+        });
+        let result = ready_rx
+            .await
+            .map_err(|error| anyhow!("codex app-server bring-up task failed: {error}"))?;
+        // No await between receiving and accepting: cancellation before this
+        // hand-off closes accepted_rx and leaves cleanup to the bring-up task.
+        let _ = accepted_tx.send(());
+        result
+    }
+
+    async fn retire_client(&self, session_id: &str, client: &Arc<CodexClient>) {
+        let mut guard = self.inner.lock().await;
+        if guard
+            .get(session_id)
+            .is_some_and(|c| Arc::ptr_eq(c, client))
+        {
+            guard.remove(session_id);
+        }
+        drop(guard);
+        client.terminate().await;
     }
 
     /// The session's live client, if any (for inline replies / interrupts).
@@ -1069,6 +1104,50 @@ mod tests {
         assert!(client.pending.lock().unwrap().is_empty());
         assert!(client.idle_since().is_some());
         client.terminate().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_bring_up_retires_children_before_and_after_registration() {
+        for before_registration in [true, false] {
+            let host = Arc::new(CodexHost::new());
+            let client = idle_test_client(Instant::now());
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let operation_host = host.clone();
+            let spawned = client.clone();
+            let operation = tokio::spawn(async move {
+                operation_host
+                    .ensure_with_spawn("compact", NativeStore::Isolated, async move {
+                        let _ = started_tx.send(());
+                        if before_registration {
+                            let _ = release_rx.await;
+                        }
+                        Ok(spawned)
+                    })
+                    .await
+            });
+            started_rx.await.unwrap();
+            if !before_registration {
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while client.pending.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            operation.abort();
+            let _ = operation.await;
+            let _ = release_tx.send(());
+            // The bring-up keeps this lock until it has reaped the cancelled
+            // child; a successor must never inherit that child's handshake.
+            let _settled = tokio::time::timeout(Duration::from_secs(2), host.spawn_lock.lock())
+                .await
+                .unwrap();
+            assert!(client.terminated.load(Ordering::Acquire));
+            assert!(host.inner.lock().await.is_empty());
+        }
     }
 
     #[cfg(unix)]

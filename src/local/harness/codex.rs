@@ -869,6 +869,27 @@ impl Codex {
 /// Compaction re-reads a whole thread; a long one is not quick.
 const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Load the persisted thread without creating a new one or adding user input.
+async fn resume_for_compaction(client: &CodexClient, thread_id: &str, path: &Path) -> Result<()> {
+    if client.resumed_thread().as_deref() == Some(thread_id) {
+        return Ok(());
+    }
+    let resumed = client
+        .request(
+            "thread/resume",
+            serde_json::json!({ "threadId": thread_id, "path": path.to_string_lossy() }),
+        )
+        .await?;
+    if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(anyhow!(
+            "Codex resumed a different thread — cannot compact this chat"
+        ));
+    }
+    client.set_thread_model(resumed.get("model").and_then(Value::as_str));
+    client.set_resumed_thread(thread_id);
+    Ok(())
+}
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -884,8 +905,8 @@ impl Harness for Codex {
     }
 
     /// The app server compacts a thread in place. The legacy `codex exec` path
-    /// spawns a fresh child per turn with no session-scoped RPC, so it — and a
-    /// session whose app-server child is gone — take the shared fallback.
+    /// spawns a fresh child per turn with no session-scoped RPC and takes the
+    /// shared fallback. An idle app-server is restored without sending a turn.
     async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
         let Some(thread_id) = ctx.native_session_id.as_deref() else {
             return Ok(CompactOutcome::Fallback);
@@ -893,18 +914,22 @@ impl Harness for Codex {
         if !runs_app_server().await {
             return Ok(CompactOutcome::Fallback);
         }
-        let Some(client) = ctx.host.codex.client_for(&ctx.session_id).await else {
-            // The thread is still resumable; summarizing would throw it away.
-            return Err(anyhow!(
-                "Codex is not running for this chat — send a message first, then compact"
-            ));
+        let live = ctx.host.codex.client_for(&ctx.session_id).await;
+        let client = match live {
+            Some(client) if client.resumed_thread().as_deref() == Some(thread_id) => client,
+            _ => {
+                let session = codex_native_session(thread_id).await?.ok_or_else(|| {
+                    anyhow!("Codex's saved thread is missing — cannot compact this chat")
+                })?;
+                let client = ctx
+                    .host
+                    .codex
+                    .ensure(&ctx.session_id, session.store)
+                    .await?;
+                resume_for_compaction(&client, thread_id, &session.path).await?;
+                client
+            }
         };
-        // A fresh child must `thread/resume` a thread before it can act on it.
-        if client.resumed_thread().as_deref() != Some(thread_id) {
-            return Err(anyhow!(
-                "Codex is not running this chat's thread — send a message first, then compact"
-            ));
-        }
         // `thread/compact/start` only starts a turn: codex compacts in the
         // background and reports through the same stream a prompt would, so the
         // request returning is not the compaction being done.
