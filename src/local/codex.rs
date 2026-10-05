@@ -14,6 +14,7 @@
 //! so `thread/resume {threadId}` survives an `orx up` restart.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
@@ -653,17 +654,13 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
-async fn spawn_client(
+fn spawn_client(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    bin: PathBuf,
+    codex_home: PathBuf,
 ) -> Result<Arc<CodexClient>> {
-    let bin = find_codex_required()?;
-    let codex_home = tokio::task::spawn_blocking(move || {
-        crate::local::native_store::prepare_codex(native_store)
-    })
-    .await
-    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
     cmd.arg("app-server");
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
@@ -798,6 +795,8 @@ impl CodexHost {
     /// child is alive; a dead child is replaced (its thread is re-resumed by
     /// the caller — `resumed_thread` starts empty on the replacement).
     ///
+    /// Config preparation runs outside the spawn lock; cancellation can
+    /// leave blocking filesystem work behind, but never a child or host lock.
     /// The spawn + registration + handshake run in a *detached* task: the
     /// calling turn task is abortable (interrupt / delete), and an aborted
     /// future would drop its `Arc` while the reader task keeps the child alive
@@ -815,17 +814,40 @@ impl CodexHost {
         let host = self.clone();
         let session = session_id.to_string();
         self.ensure_with_spawn(session_id, native_store, async move {
-            spawn_client(&session, host.up_port.get().copied(), native_store).await
+            let bin = find_codex_required()?;
+            let codex_home =
+                tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+                    .await
+                    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
+            Ok(move || {
+                spawn_client(
+                    &session,
+                    host.up_port.get().copied(),
+                    native_store,
+                    bin,
+                    codex_home,
+                )
+            })
         })
         .await
     }
 
-    async fn ensure_with_spawn(
+    async fn ensure_with_spawn<F>(
         self: &Arc<Self>,
         session_id: &str,
         native_store: NativeStore,
-        spawn: impl std::future::Future<Output = Result<Arc<CodexClient>>> + Send + 'static,
-    ) -> Result<Arc<CodexClient>> {
+        prepare: impl std::future::Future<Output = Result<F>>,
+    ) -> Result<Arc<CodexClient>>
+    where
+        F: FnOnce() -> Result<Arc<CodexClient>> + Send + 'static,
+    {
+        {
+            let _spawning = self.spawn_lock.lock().await;
+            if let Some(existing) = self.reusable_client(session_id, native_store).await {
+                return Ok(existing);
+            }
+        }
+        let spawn = prepare.await?;
         let host = self.clone();
         let session = session_id.to_string();
         let (ready_tx, ready_rx) = oneshot::channel();
@@ -835,24 +857,23 @@ impl CodexHost {
             if ready_tx.is_closed() {
                 return;
             }
+            // Another caller may have completed startup during preparation.
+            if let Some(existing) = host.reusable_client(&session, native_store).await {
+                let _ = ready_tx.send(Ok(existing));
+                return;
+            }
             {
                 let mut guard = host.inner.lock().await;
-                if let Some(existing) = guard.get(&session) {
-                    if existing.native_store() == native_store
-                        && matches!(existing.child.lock().await.try_wait(), Ok(None))
-                    {
-                        existing.touch();
-                        let _ = ready_tx.send(Ok(existing.clone()));
-                        return;
-                    }
-                }
                 if let Some(stale) = guard.remove(&session) {
                     stale.terminate().await;
                 }
             }
-            // Do not abort spawn: it may be awaiting blocking config work or
-            // have already launched a child that must remain reachable.
-            let client = match spawn.await {
+            if ready_tx.is_closed() {
+                return;
+            }
+            // The process launch itself has no await; a detached owner always
+            // registers or reaps the child, even if the caller is cancelled.
+            let client = match spawn() {
                 Ok(client) => client,
                 Err(error) => {
                     let _ = ready_tx.send(Err(error));
@@ -887,6 +908,24 @@ impl CodexHost {
         // hand-off closes accepted_rx and leaves cleanup to the bring-up task.
         let _ = accepted_tx.send(());
         result
+    }
+
+    /// Called under spawn_lock, so a client cannot be reused mid-handshake.
+    async fn reusable_client(
+        &self,
+        session_id: &str,
+        native_store: NativeStore,
+    ) -> Option<Arc<CodexClient>> {
+        let guard = self.inner.lock().await;
+        let client = guard.get(session_id)?;
+        if client.native_store() == native_store
+            && matches!(client.child.lock().await.try_wait(), Ok(None))
+        {
+            client.touch();
+            Some(client.clone())
+        } else {
+            None
+        }
     }
 
     async fn retire_client(&self, session_id: &str, client: &Arc<CodexClient>) {
@@ -1108,46 +1147,79 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn cancelled_bring_up_retires_children_before_and_after_registration() {
-        for before_registration in [true, false] {
-            let host = Arc::new(CodexHost::new());
-            let client = idle_test_client(Instant::now());
-            let (started_tx, started_rx) = oneshot::channel();
-            let (release_tx, release_rx) = oneshot::channel();
-            let operation_host = host.clone();
-            let spawned = client.clone();
-            let operation = tokio::spawn(async move {
-                operation_host
-                    .ensure_with_spawn("compact", NativeStore::Isolated, async move {
-                        let _ = started_tx.send(());
-                        if before_registration {
-                            let _ = release_rx.await;
-                        }
-                        Ok(spawned)
+    async fn cancelled_bring_up_does_not_block_other_chats_or_leak_children() {
+        let host = Arc::new(CodexHost::new());
+        let warm = idle_test_client(Instant::now());
+        host.inner.lock().await.insert("warm".into(), warm.clone());
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let launched = Arc::new(AtomicBool::new(false));
+        let spawn_flag = launched.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    Ok(move || {
+                        spawn_flag.store(true, Ordering::Release);
+                        Ok(idle_test_client(Instant::now()))
                     })
-                    .await
-            });
-            started_rx.await.unwrap();
-            if !before_registration {
-                tokio::time::timeout(Duration::from_secs(2), async {
-                    while client.pending.lock().unwrap().is_empty() {
-                        tokio::task::yield_now().await;
-                    }
                 })
                 .await
-                .unwrap();
-            }
-            operation.abort();
-            let _ = operation.await;
-            let _ = release_tx.send(());
-            // The bring-up keeps this lock until it has reaped the cancelled
-            // child; a successor must never inherit that child's handshake.
-            let _settled = tokio::time::timeout(Duration::from_secs(2), host.spawn_lock.lock())
+        });
+        started_rx.await.unwrap();
+        // A stalled preparation neither blocks reuse nor another cold startup.
+        let reused = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("warm", NativeStore::Isolated, async {
+                Ok(|| panic!("a warm client must not be spawned again"))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(Arc::ptr_eq(&reused, &warm));
+        let cold = tokio::time::timeout(
+            Duration::from_secs(2),
+            host.ensure_with_spawn("other", NativeStore::Isolated, async {
+                Err::<fn() -> Result<Arc<CodexClient>>, _>(anyhow!("preparation reached"))
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cold.err().unwrap().to_string(), "preparation reached");
+        operation.abort();
+        let _ = operation.await;
+        assert!(release_tx.send(()).is_err());
+        assert!(!launched.load(Ordering::Acquire));
+        host.kill_session("warm").await;
+
+        // Cancellation after process launch still reaps the registered child.
+        let client = idle_test_client(Instant::now());
+        let spawned = client.clone();
+        let operation_host = host.clone();
+        let operation = tokio::spawn(async move {
+            operation_host
+                .ensure_with_spawn("compact", NativeStore::Isolated, async {
+                    Ok(move || Ok(spawned))
+                })
                 .await
-                .unwrap();
-            assert!(client.terminated.load(Ordering::Acquire));
-            assert!(host.inner.lock().await.is_empty());
-        }
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while client.pending.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        operation.abort();
+        let _ = operation.await;
+        let _settled = tokio::time::timeout(Duration::from_secs(2), host.spawn_lock.lock())
+            .await
+            .unwrap();
+        assert!(client.terminated.load(Ordering::Acquire));
+        assert!(host.inner.lock().await.is_empty());
     }
 
     #[cfg(unix)]

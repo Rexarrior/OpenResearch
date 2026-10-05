@@ -870,16 +870,18 @@ impl Codex {
 const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Load the persisted thread without creating a new one or adding user input.
-async fn resume_for_compaction(client: &CodexClient, thread_id: &str, path: &Path) -> Result<()> {
+async fn resume_for_compaction(
+    client: &CodexClient,
+    thread_id: &str,
+    path: &Path,
+    mut setup: Value,
+) -> Result<()> {
     if client.resumed_thread().as_deref() == Some(thread_id) {
         return Ok(());
     }
-    let resumed = client
-        .request(
-            "thread/resume",
-            serde_json::json!({ "threadId": thread_id, "path": path.to_string_lossy() }),
-        )
-        .await?;
+    setup["threadId"] = Value::String(thread_id.to_string());
+    setup["path"] = Value::String(path.to_string_lossy().into_owned());
+    let resumed = client.request("thread/resume", setup).await?;
     if resumed.pointer("/thread/id").and_then(Value::as_str) != Some(thread_id) {
         return Err(anyhow!(
             "Codex resumed a different thread — cannot compact this chat"
@@ -921,12 +923,28 @@ impl Harness for Codex {
                 let session = codex_native_session(thread_id).await?.ok_or_else(|| {
                     anyhow!("Codex's saved thread is missing — cannot compact this chat")
                 })?;
+                let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
                 let client = ctx
                     .host
                     .codex
                     .ensure(&ctx.session_id, session.store)
                     .await?;
-                resume_for_compaction(&client, thread_id, &session.path).await?;
+                let auto_review_supported = if ctx.permission_mode.unwrap_or(PermissionMode::Auto)
+                    == PermissionMode::Auto
+                {
+                    codex_auto_review_supported(&client, &repo).await
+                } else {
+                    false
+                };
+                let setup = codex_thread_setup(
+                    &repo,
+                    &playbook_md,
+                    ctx.permission_mode,
+                    auto_review_supported,
+                    ctx.model.as_deref(),
+                    ctx.service_tier.as_deref(),
+                );
+                resume_for_compaction(&client, thread_id, &session.path, setup).await?;
                 client
             }
         };
@@ -2629,6 +2647,48 @@ async fn ensure_codex_pre_accept(
     }
 }
 
+async fn codex_playbook(
+    project: &crate::local::model::LocalProject,
+    session_id: &str,
+) -> Result<(PathBuf, String)> {
+    let project = project.clone();
+    let session_id = session_id.to_string();
+    let (repo, playbook) = tokio::task::spawn_blocking(move || {
+        ensure_playbook(&project, &session_id, Codex.session_skills_dir())
+    })
+    .await
+    .map_err(|e| anyhow!("playbook task failed: {e}"))??;
+    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    Ok((repo, playbook_md))
+}
+
+/// Both a normal turn and idle compaction restore the same thread settings.
+fn codex_thread_setup(
+    repo: &Path,
+    playbook_md: &str,
+    permission_mode: Option<PermissionMode>,
+    auto_review_supported: bool,
+    model: Option<&str>,
+    service_tier: Option<&str>,
+) -> Value {
+    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        codex_policies(permission_mode, auto_review_supported);
+    let mut setup = serde_json::json!({
+        "cwd": repo.to_string_lossy(),
+        "sandbox": sandbox_mode,
+        "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
+        "developerInstructions": playbook_md,
+    });
+    if let Some(service_tier) = service_tier {
+        setup["serviceTier"] = Value::String(service_tier.to_string());
+    }
+    if let Some(model) = model {
+        setup["model"] = Value::String(model.to_string());
+    }
+    setup
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -2642,16 +2702,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     ctx.host
         .resolve_stale_prompts(&ctx.session_id, true)
         .await?;
-    let project = ctx.project.clone();
-    let session_id = ctx.session_id.clone();
-    // The modular orx skills land in the harness's session-skills dir, fresh,
-    // for this session's agent to auto-load — source of truth is the trait.
-    let skills_dir = Codex.session_skills_dir();
-    let (repo, playbook) =
-        tokio::task::spawn_blocking(move || ensure_playbook(&project, &session_id, skills_dir))
-            .await
-            .map_err(|e| anyhow!("playbook task failed: {e}"))??;
-    let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
+    let (repo, playbook_md) = codex_playbook(&ctx.project, &ctx.session_id).await?;
 
     let native_session = match ctx.native_session_id.as_deref() {
         Some(id) => codex_native_session(id).await?,
@@ -2668,7 +2719,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         } else {
             false
         };
-    let (sandbox_mode, approval_policy, approvals_reviewer) =
+    let (_, approval_policy, approvals_reviewer) =
         codex_policies(ctx.permission_mode, auto_review_supported);
 
     // Thread bring-up: reuse the thread this child already carries, resume a
@@ -2677,19 +2728,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // both start and resume, so a long-lived session picks up playbook
     // improvements on the next restart rather than keeping its first version
     // forever.
-    let mut thread_setup = serde_json::json!({
-        "cwd": repo.to_string_lossy(),
-        "sandbox": sandbox_mode,
-        "approvalPolicy": approval_policy,
-        "approvalsReviewer": approvals_reviewer,
-        "developerInstructions": playbook_md,
-    });
-    if let Some(service_tier) = &ctx.service_tier {
-        thread_setup["serviceTier"] = Value::String(service_tier.clone());
-    }
-    if let Some(model) = &ctx.model {
-        thread_setup["model"] = Value::String(model.clone());
-    }
+    let mut thread_setup = codex_thread_setup(
+        &repo,
+        &playbook_md,
+        ctx.permission_mode,
+        auto_review_supported,
+        ctx.model.as_deref(),
+        ctx.service_tier.as_deref(),
+    );
     if ctx.reset_codex_model {
         // Codex keeps the old thread model when a turn omits its model override.
         append_native_recovery_context(ctx, &mut thread_setup);
