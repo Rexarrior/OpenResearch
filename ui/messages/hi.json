@@ -581,6 +581,7 @@
   "activity_searched_pubmed": "PubMed खोजा",
   "activity_searched_literature": "साहित्य खोजा",
   "activity_for_query": "“{query}” के लिए {activity}",
+  "activity_for_queries": "{activity}: {count} क्वेरी",
   "activity_read_target": "{target} पढ़ा",
   "activity_read_paper": "एक पेपर पढ़ा",
   "activity_updated_experiment_notes": "प्रयोग के नोट्स अपडेट किए",
@@ -1282,5 +1283,15 @@
   "artifacts_search_unlimited_warning": "जारी रखने पर समय सीमा हट जाएगी। फ़ाइल सिस्टम विफल होने पर यह प्रक्रिया कभी समाप्त नहीं हो सकती। आगे की खोज रद्द की जा सकती है, लेकिन पहले से अटकी फ़ाइल सिस्टम कॉल बाधित नहीं की जा सकती।",
   "artifacts_search_continue": "जारी रखें",
   "artifacts_search_cancel": "खोज रद्द करें",
-  "artifacts_search_cancelled": "खोज रद्द हुई। नई खोज शुरू करने के लिए क्वेरी बदलें।"
+  "artifacts_search_cancelled": "खोज रद्द हुई। नई खोज शुरू करने के लिए क्वेरी बदलें।",
+  "sidebar_project_details": "प्रोजेक्ट विवरण · {name}",
+  "sidebar_project_chats": "{count} चैट",
+  "sidebar_edit_project": "प्रोजेक्ट संपादित करें",
+  "sidebar_source_folder": "स्रोत फ़ोल्डर",
+  "sidebar_pin_project": "पिन करें",
+  "sidebar_unpin_project": "पिन हटाएँ",
+  "sidebar_reveal_project": "Finder में दिखाएँ",
+  "sidebar_filter": "फ़िल्टर",
+  "sidebar_group_by": "समूह बनाएँ",
+  "sidebar_one_list": "एक सूची में"
 }

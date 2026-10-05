@@ -575,6 +575,7 @@
   "activity_searched_pubmed": "已搜索 PubMed",
   "activity_searched_literature": "已搜索文献",
   "activity_for_query": "{activity}：“{query}”",
+  "activity_for_queries": "{activity}，共 {count} 个查询",
   "activity_read_target": "已读取 {target}",
   "activity_read_paper": "已读取论文",
   "activity_updated_experiment_notes": "已更新实验笔记",
@@ -1282,5 +1283,15 @@
   "artifacts_search_unlimited_warning": "继续将移除时间限制。如果文件系统发生故障，操作可能永远无法完成。仍可取消后续遍历，但无法中断已阻塞的文件系统调用。",
   "artifacts_search_continue": "继续",
   "artifacts_search_cancel": "取消搜索",
-  "artifacts_search_cancelled": "搜索已取消。更改查询可开始新的搜索。"
+  "artifacts_search_cancelled": "搜索已取消。更改查询可开始新的搜索。",
+  "sidebar_project_details": "项目详情 · {name}",
+  "sidebar_project_chats": "{count} 个聊天",
+  "sidebar_edit_project": "编辑项目",
+  "sidebar_source_folder": "源文件夹",
+  "sidebar_pin_project": "置顶",
+  "sidebar_unpin_project": "取消置顶",
+  "sidebar_reveal_project": "在访达中显示",
+  "sidebar_filter": "筛选",
+  "sidebar_group_by": "分组方式",
+  "sidebar_one_list": "单一列表"
 }

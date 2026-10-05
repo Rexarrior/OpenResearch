@@ -581,6 +581,7 @@
   "activity_searched_pubmed": "Buscó en PubMed",
   "activity_searched_literature": "Buscó en la literatura",
   "activity_for_query": "{activity}: “{query}”",
+  "activity_for_queries": "{activity} para {count} consultas",
   "activity_read_target": "Leyó {target}",
   "activity_read_paper": "Leyó un paper",
   "activity_updated_experiment_notes": "Actualizó las notas del experimento",
@@ -1282,5 +1283,15 @@
   "artifacts_search_unlimited_warning": "Continuar elimina el límite de tiempo. Si el sistema de archivos falla, la operación podría no terminar. Puedes cancelar el recorrido, pero no interrumpir una llamada al sistema de archivos ya bloqueada.",
   "artifacts_search_continue": "Continuar",
   "artifacts_search_cancel": "Cancelar búsqueda",
-  "artifacts_search_cancelled": "Búsqueda cancelada. Cambia la consulta para iniciar otra."
+  "artifacts_search_cancelled": "Búsqueda cancelada. Cambia la consulta para iniciar otra.",
+  "sidebar_project_details": "Detalles del proyecto · {name}",
+  "sidebar_project_chats": "{count} chats",
+  "sidebar_edit_project": "Editar proyecto",
+  "sidebar_source_folder": "Carpeta de origen",
+  "sidebar_pin_project": "Fijar",
+  "sidebar_unpin_project": "Desfijar",
+  "sidebar_reveal_project": "Mostrar en Finder",
+  "sidebar_filter": "Filtrar",
+  "sidebar_group_by": "Agrupar por",
+  "sidebar_one_list": "En una lista"
 }

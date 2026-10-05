@@ -580,6 +580,7 @@
   "activity_searched_pubmed": "بحث في PubMed",
   "activity_searched_literature": "بحث في الأدبيات",
   "activity_for_query": "{activity} عن «{query}»",
+  "activity_for_queries": "{activity} لـ {count} استعلامات",
   "activity_read_target": "قرأ {target}",
   "activity_read_paper": "قرأ ورقة",
   "activity_updated_experiment_notes": "حدّث ملاحظات التجربة",
@@ -1282,5 +1283,15 @@
   "artifacts_search_unlimited_warning": "تزيل المتابعة الحد الزمني. إذا تعطل نظام الملفات فقد لا تنتهي العملية. يمكنك إلغاء المزيد من البحث، لكن لا يمكن مقاطعة استدعاء نظام ملفات عالق بالفعل.",
   "artifacts_search_continue": "متابعة",
   "artifacts_search_cancel": "إلغاء البحث",
-  "artifacts_search_cancelled": "تم إلغاء البحث. غيّر الاستعلام لبدء بحث جديد."
+  "artifacts_search_cancelled": "تم إلغاء البحث. غيّر الاستعلام لبدء بحث جديد.",
+  "sidebar_project_details": "تفاصيل المشروع · {name}",
+  "sidebar_project_chats": "{count} محادثات",
+  "sidebar_edit_project": "تعديل المشروع",
+  "sidebar_source_folder": "مجلد المصدر",
+  "sidebar_pin_project": "تثبيت",
+  "sidebar_unpin_project": "إلغاء التثبيت",
+  "sidebar_reveal_project": "إظهار في Finder",
+  "sidebar_filter": "تصفية",
+  "sidebar_group_by": "تجميع حسب",
+  "sidebar_one_list": "في قائمة واحدة"
 }

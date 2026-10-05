@@ -581,6 +581,7 @@
   "activity_searched_pubmed": "Searched PubMed",
   "activity_searched_literature": "Searched the literature",
   "activity_for_query": "{activity} for “{query}”",
+  "activity_for_queries": "{activity} for {count} queries",
   "activity_read_target": "Read {target}",
   "activity_read_paper": "Read a paper",
   "activity_updated_experiment_notes": "Updated experiment notes",
@@ -1282,5 +1283,15 @@
   "artifacts_search_unlimited_warning": "Continuing removes the time limit. If the filesystem fails, this operation may never finish. You can still cancel further traversal, but an already blocked filesystem call cannot be interrupted.",
   "artifacts_search_continue": "Continue",
   "artifacts_search_cancel": "Cancel search",
-  "artifacts_search_cancelled": "Search cancelled. Change the query to start a new search."
+  "artifacts_search_cancelled": "Search cancelled. Change the query to start a new search.",
+  "sidebar_project_details": "Project details · {name}",
+  "sidebar_project_chats": "{count} chats",
+  "sidebar_edit_project": "Edit project",
+  "sidebar_source_folder": "Source folder",
+  "sidebar_pin_project": "Pin",
+  "sidebar_unpin_project": "Unpin",
+  "sidebar_reveal_project": "Reveal in Finder",
+  "sidebar_filter": "Filter",
+  "sidebar_group_by": "Group by",
+  "sidebar_one_list": "In one list"
 }
