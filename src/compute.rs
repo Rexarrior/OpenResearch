@@ -143,7 +143,7 @@ fn archive(repo: &Path, revision: &str, format: &str, destination: &Path) -> Res
     Err(anyhow!(
         "git archive failed for {}: {}",
         revision,
-        String::from_utf8_lossy(&output.stderr).trim()
+        crate::local::git::failure_detail(&output)
     ))
 }
 
@@ -329,9 +329,9 @@ pub trait ComputeBackend: Send + Sync {
         })
     }
 
-    async fn cancel(&self, handle: &StoredRun) -> Result<()> {
+    async fn cancel(&self, handle: &StoredRun, reason: &str) -> Result<()> {
         // Agent-session callers route through orx up before reaching this trusted path.
-        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id)
+        crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id, reason)
     }
 
     async fn cleanup(&self, handle: &StoredRun) -> Result<()> {
@@ -630,11 +630,33 @@ backend_adapter!(
     "SSH tar stream",
     false,
     preflight | args | {
-        if args.flavor.is_none() {
+        let Some(flavor) = args.flavor.as_deref() else {
             return Ok(not_ready("OpenResearch requires --flavor."));
-        }
-        if crate::config::load_credentials().await?.is_none() {
+        };
+        let Some(creds) = crate::config::load_credentials().await? else {
             return Ok(not_ready("OpenResearch requires `orx login`."));
+        };
+        // An unknown GPU id would only 400 after the run is recorded as failed.
+        if let crate::client::SandboxTarget::New { gpu, .. } =
+            crate::jobs::openresearch::parse_flavor(flavor, 0, None)?
+        {
+            if let Ok(Ok(catalog)) = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                crate::client::list_catalog(&creds),
+            )
+            .await
+            {
+                let mut ids: Vec<_> = catalog.offers.into_iter().map(|o| o.gpu).collect();
+                ids.sort();
+                ids.dedup();
+                if !ids.is_empty() && !ids.contains(&gpu) {
+                    return Ok(not_ready(format!(
+                        "No OpenResearch offers for GPU '{gpu}'. Available now: {}. \
+                         See `orx compute`.",
+                        ids.join(", ")
+                    )));
+                }
+            }
         }
         ready()
     },
@@ -703,6 +725,17 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
         return Err(anyhow!("--host only applies with --backend ssh or slurm."));
     }
+    if (args.cpus.is_some() || args.mem.is_some()) && args.backend.as_deref() != Some("slurm") {
+        return Err(anyhow!(
+            "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor."
+        ));
+    }
+    if args.cpus == Some(0) {
+        return Err(anyhow!("--cpus must be at least 1."));
+    }
+    if let Some(mem) = &args.mem {
+        crate::jobs::slurm::parse_mem(mem)?;
+    }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
     }
@@ -757,6 +790,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             "{}",
             preflight
                 .detail
+                .filter(|detail| !detail.trim().is_empty())
                 .unwrap_or_else(|| "Compute backend is not ready.".to_string())
         ));
     }
@@ -788,6 +822,8 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        cpus_per_task: None,
+        mem: None,
         source_digest: None,
         source_path: None,
         source_size: None,
@@ -808,6 +844,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(source.0.revision.clone()),
         result_markdown: None,
         cancel_requested: false,
+        cancel_reason: None,
         chat_session_id: args.launching_chat_session(),
     };
     let chat_harness = match &pending.chat_session_id {
@@ -947,11 +984,12 @@ fn reserve_run(
             .find(|run| !crate::local::is_terminal(&run.status))
         {
             return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). Cancel it with \
-                 `orx exp cancel {}` or pass --force to launch anyway.",
+                "Run {} is already in flight for this experiment ({}). Wait for it with \
+                 `orx exp wait {exp}`; cancel it with `orx exp cancel {exp}` only if it \
+                 should stop, or pass --force to launch anyway.",
                 run.id,
                 run.status,
-                pending.experiment_id
+                exp = pending.experiment_id
             ));
         }
     }
@@ -1099,6 +1137,8 @@ pub(crate) mod tests {
             manifest: None,
             image: None,
             timeout: None,
+            cpus: None,
+            mem: None,
             force: false,
             chat_session_id: None,
             invocation_context: None,
@@ -1196,6 +1236,35 @@ pub(crate) mod tests {
         assert!(validate_run_args(&args).is_err());
         args.image = None;
         args.timeout = Some("1h".into());
+        assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn slurm_resources_are_rejected_on_every_other_backend() {
+        let mut args = tinker_args();
+        for backend in crate::local::BACKENDS
+            .iter()
+            .filter(|backend| **backend != "slurm")
+        {
+            args.backend = Some(backend.to_string());
+            for (cpus, mem) in [(Some(8), None), (None, Some("64G"))] {
+                args.cpus = cpus;
+                args.mem = mem.map(str::to_string);
+                assert_eq!(
+                    validate_run_args(&args).unwrap_err().to_string(),
+                    "--cpus/--mem only apply with --backend slurm. Size other backends with --flavor.",
+                    "{backend}"
+                );
+            }
+        }
+        args.backend = Some("slurm".into());
+        args.cpus = Some(8);
+        args.mem = Some("64G".into());
+        assert!(validate_run_args(&args).is_ok());
+        args.mem = Some("64GB".into());
+        assert!(validate_run_args(&args).is_err());
+        args.mem = None;
+        args.cpus = Some(0);
         assert!(validate_run_args(&args).is_err());
     }
 

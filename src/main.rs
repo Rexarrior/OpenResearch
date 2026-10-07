@@ -24,6 +24,7 @@ mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
+mod net;
 mod output;
 mod paths;
 mod plane;
@@ -557,6 +558,18 @@ pub struct ExpRunArgs {
     /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
     pub timeout: Option<String>,
+    /// Cores for the job (with `--backend slurm`): `#SBATCH --cpus-per-task=`.
+    /// Omitted falls back to the slurm settings, then the partition default —
+    /// which on many clusters is a single core, whatever the GPU request.
+    #[arg(long)]
+    pub cpus: Option<u32>,
+    /// Host memory for the job (with `--backend slurm`): `#SBATCH --mem=`, in
+    /// Slurm's own syntax (64G, 4000M, or a bare number for megabytes).
+    /// Omitted falls back to the slurm settings, then the partition default,
+    /// which is usually `DefMemPerCPU` × the core count — so raising `--cpus`
+    /// raises memory with it.
+    #[arg(long)]
+    pub mem: Option<String>,
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
@@ -958,15 +971,17 @@ async fn main() {
     // AppImage's AppRun. See commands::app.
     #[cfg(all(desktop_app, not(target_os = "macos")))]
     if commands::app::launched_with_app_arg() {
-        telemetry::set_flag(false);
+        telemetry::set_flag(std::env::var_os(commands::app::APP_NO_TELEMETRY_ENV).is_some());
         commands::app::run().await;
         return;
     }
 
-    let mut cli = Cli::parse();
-    // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
+    let cli = Cli::parse();
+    // Double-clicked from Explorer: open the desktop app instead of a console session.
+    #[cfg(windows)]
     if cli.command.is_none() && owns_its_console() {
-        cli.command = Cli::parse_from(["orx", "up"]).command;
+        relaunch_as_app(cli.no_telemetry);
+        return;
     }
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
@@ -984,12 +999,9 @@ async fn main() {
     // plan mode): it must stay fast and touch neither stdout nor the network, so
     // skip the update check and telemetry and run it directly.
     if matches!(command, Command::InvocationGate) {
+        // Fail open: a missing model only loses attribution, a deny blocks every Bash call.
         if let Err(error) = commands::invocation_gate::run().await {
             eprintln!("orx invocation-gate: {error}");
-            println!(
-                "{}",
-                serde_json::json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"OpenResearch could not capture this tool invocation's model"}})
-            );
         }
         return;
     }
@@ -1045,7 +1057,8 @@ async fn main() {
         command,
         Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
-    .then(updates::UpdateWarning::start);
+    // `orx up` updates from its own periodic pass, once it holds the backend lock that defers it.
+    .then(|| updates::UpdateWarning::start(!matches!(command, Command::Up(_))));
 
     // Anonymous usage analytics. Record the flag process-globally so command
     // modules can fire events without threading it through, then fire the
@@ -1086,9 +1099,35 @@ fn owns_its_console() -> bool {
     count == 1
 }
 
-#[cfg(not(windows))]
-fn owns_its_console() -> bool {
-    false
+/// Restarts as `orx app` in a console no one sees, as OpenResearch.exe does, so
+/// the console Explorer opened closes when this process exits.
+#[cfg(windows)]
+fn relaunch_as_app(no_telemetry: bool) {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+
+    let started = std::env::current_exe().and_then(|exe| {
+        let mut app = std::process::Command::new(exe);
+        if no_telemetry {
+            app.env(commands::app::APP_NO_TELEMETRY_ENV, "1");
+        }
+        app.arg(commands::app::APP_ARG)
+            // Inherited handles would tie the app to Explorer's console.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+    });
+    match started {
+        // Explorer let this process take the foreground; pass that to the app's window.
+        // SAFETY: a plain syscall on the child's process id.
+        Ok(child) => unsafe {
+            AllowSetForegroundWindow(child.id());
+        },
+        Err(error) => show_error_dialog(&format!("Could not start OpenResearch: {error}")),
+    }
 }
 
 /// A double-clicked exe's console closes with it, so repeat the error in a dialog.
@@ -1300,16 +1339,6 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
-
-    /// A double-clicked orx.exe reaches `up` through this parse; an argv clap
-    /// rejected would panic there instead of opening the dashboard.
-    #[test]
-    fn a_double_click_parses_as_a_local_up() {
-        assert!(matches!(
-            Cli::parse_from(["orx", "up"]).command,
-            Some(Command::Up(args)) if args.remote.is_none()
-        ));
-    }
 
     #[test]
     fn library_add_commands_are_distinct_from_reading_skill_docs() {

@@ -54,6 +54,7 @@ mod harness_setup;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    updates::note_startup_image();
     let port = args.port;
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
@@ -73,27 +74,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-        Ok(listener) => listener,
-        // A second double-click should reach the running dashboard, not fail on its port.
-        Err(error)
-            if error.kind() == std::io::ErrorKind::AddrInUse
-                && crate::owns_its_console()
-                && dashboard_is_serving(port).await =>
-        {
-            let url = format!("http://127.0.0.1:{port}");
-            eprintln!("orx up: already running — opening {url}");
-            if !args.no_browser {
-                if let Some(watch) =
-                    browser::open_dashboard(&url, crate::telemetry::UpLaunchMode::of(&args))
-                {
-                    let _ = watch.await;
-                }
-            }
-            return Ok(());
-        }
-        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
-    };
+    let backend_lock = tokio::task::spawn_blocking(updates::BackendLock::acquire)
+        .await
+        .ok()
+        .flatten();
+    // An install that finished while this process waited replaced the image it was started from.
+    if backend_lock.is_some() && updates::newer_exe_on_disk().await {
+        drop(backend_lock);
+        let err = updates::relaunch(port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|error| anyhow!("Could not bind 127.0.0.1:{}: {}", port, error))?;
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -184,6 +177,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
+        state.data_dir_move_in_progress.clone(),
+        state.data_dir_gate.clone(),
+    ));
+    tokio::spawn(adopt_orphaned_runs(
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
@@ -288,7 +285,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
     }
     state.dashboard_lock.lock().unwrap().take();
     if restarting {
-        eprintln!("orx up: restarting into the updated orx");
+        drop(backend_lock);
+        if !updates::newer_exe_on_disk().await {
+            eprintln!("orx up: installing the update before restarting");
+            let failures = updates::failure_count();
+            if let Err(err) = updates::apply_now().await {
+                eprintln!("orx up: {err} Restarting on this version.");
+            }
+            // Unless the updater counted it or still will, back off (deferred again, or it
+            // never started), or the relaunch restarts straight back into this.
+            if !updates::newer_exe_on_disk().await
+                && updates::failure_count() == failures
+                && !updates::updater_running()
+            {
+                updates::record_attempt(false);
+            }
+        }
+        eprintln!("orx up: restarting");
         let err = updates::relaunch(actual_port);
         return Err(anyhow!("orx up: could not restart: {err}"));
     }
@@ -500,6 +513,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
+        .route("/api/git/install", post(install_git))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
             "/api/projects/starter-prompts/prewarm",
@@ -856,6 +870,7 @@ fn remote_route_forbidden(path: &str) -> bool {
     matches!(
         path,
         "/api/project-path/pick"
+            | "/api/git/install"
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
@@ -966,22 +981,6 @@ impl From<&StoredRun> for ApiRun {
 }
 
 // --- basic routes ---------------------------------------------------------
-
-/// Whether a dashboard this build can talk to, not some other server, holds `port`.
-async fn dashboard_is_serving(port: u16) -> bool {
-    let Ok(response) = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/api/health"))
-        .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await
-    else {
-        return false;
-    };
-    response.json::<Value>().await.is_ok_and(|body| {
-        body.get("dashboardProtocol").and_then(Value::as_u64)
-            == Some(u64::from(crate::commands::up_remote::DASHBOARD_PROTOCOL))
-    })
-}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
@@ -1376,12 +1375,26 @@ struct ProjectPathStatusQ {
     path: Option<String>,
 }
 
+async fn install_git() -> ApiResult {
+    // Spawned, so a page reload mid-install cannot orphan the extractor.
+    tokio::spawn(local::portable_git::install())
+        .await
+        .map_err(|error| ApiError::from(anyhow!("Git install task failed: {error}")))?
+        // `:#` keeps the cause (DNS, TLS, proxy) behind the outer context.
+        .map_err(|error| {
+            eprintln!("orx up: Git install failed: {error:#}");
+            ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"))
+        })?;
+    Ok(Json(json!({})))
+}
+
 async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
     tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
         let git_version = local::git::version();
         let Some(path) = q.path.filter(|path| !path.trim().is_empty()) else {
             return Ok(Json(json!({
                 "gitVersion": git_version,
+                "gitInstallable": cfg!(windows) && git_version.is_none(),
                 "resolvedPath": null,
                 "exists": null,
                 "directory": null,
@@ -2004,7 +2017,11 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
     if !in_flight.is_empty() {
         let mut failures = Vec::new();
         for run in &in_flight {
-            if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
+            if let Err(err) = crate::commands::exp::request_local_run_cancel(
+                &store,
+                &run.id,
+                "Cancel requested because the project is being deleted.",
+            ) {
                 failures.push(format!("{}: {err}", run.id));
             }
         }
@@ -2114,6 +2131,8 @@ struct CreateRunReq {
     telemetry_suppressed: bool,
     experiment_id: String,
     backend: Option<String>,
+    cpus: Option<u32>,
+    mem: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
     container: Option<String>,
@@ -2129,6 +2148,67 @@ struct CreateRunReq {
     force: bool,
     chat_session_id: Option<String>,
     agent_origin: Option<String>,
+    /// Absent from dashboard callers; checked against orx up's own config dir.
+    caller_config_dir: Option<std::path::PathBuf>,
+}
+
+impl CreateRunReq {
+    fn from_run_args(args: &crate::ExpRunArgs) -> Result<Self> {
+        Ok(Self {
+            telemetry_suppressed: args.telemetry_suppressed
+                || !crate::telemetry::accounting_reports_enabled(),
+            invocation_context: args
+                .invocation_identity()?
+                .map(|identity| serde_json::to_string(&identity))
+                .transpose()?,
+            experiment_id: args.exp_id.clone(),
+            backend: args.backend.clone(),
+            cpus: args.cpus,
+            mem: args.mem.clone(),
+            flavor: args.flavor.clone(),
+            host: args.host.clone(),
+            container: args.container.clone(),
+            no_container: args.no_container,
+            manifest: args.manifest.clone(),
+            image: args.image.clone(),
+            timeout: args.timeout.clone(),
+            org: args.org.clone(),
+            provider: args.provider.clone(),
+            disk: args.disk,
+            force: args.force,
+            chat_session_id: args.launching_chat_session(),
+            agent_origin: args.agent_origin.clone(),
+            caller_config_dir: Some(absolute_config_dir()),
+        })
+    }
+
+    fn into_run_args(self) -> crate::ExpRunArgs {
+        let mut backend = self.backend;
+        let mut flavor = self.flavor;
+        local::apply_compute_default(&mut backend, &mut flavor);
+        crate::ExpRunArgs {
+            invocation_context: self.invocation_context,
+            telemetry_suppressed: self.telemetry_suppressed,
+            exp_id: self.experiment_id,
+            disk: self.disk,
+            provider: self.provider,
+            backend: Some(backend.unwrap_or_else(|| "local".to_string())),
+            flavor,
+            org: self.org,
+            host: self.host,
+            container: self.container,
+            no_container: self.no_container,
+            manifest: self.manifest,
+            image: self.image,
+            timeout: self.timeout,
+            cpus: self.cpus,
+            mem: self.mem,
+            force: self.force,
+            chat_session_id: self.chat_session_id,
+            agent_origin: self.agent_origin,
+            forwarded: true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2140,6 +2220,7 @@ pub(crate) struct RunLaunchSummary {
     pub run_id: String,
     pub experiment_id: String,
     pub job_id: Option<String>,
+    pub slurm_resources: Option<String>,
 }
 
 async fn decode_local_response<T: serde::de::DeserializeOwned>(
@@ -2158,9 +2239,12 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
                 value
                     .get("error")
                     .and_then(Value::as_str)
-                    .map(str::to_string)
+                    .map(|error| error.trim().to_string())
             })
             .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
+        if detail.is_empty() {
+            return Err(anyhow!("orx up could not {action}: HTTP {status}"));
+        }
         if status.is_client_error() {
             return Err(anyhow!("{detail}"));
         }
@@ -2171,7 +2255,7 @@ async fn decode_local_response<T: serde::de::DeserializeOwned>(
 }
 
 fn local_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+    crate::net::loopback_client()
         .connect_timeout(Duration::from_secs(3))
         .build()
         .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
@@ -2192,29 +2276,7 @@ pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
 ) -> Result<RunLaunchSummary> {
-    let request = CreateRunReq {
-        telemetry_suppressed: args.telemetry_suppressed
-            || !crate::telemetry::accounting_reports_enabled(),
-        invocation_context: args
-            .invocation_identity()?
-            .map(|identity| serde_json::to_string(&identity))
-            .transpose()?,
-        experiment_id: args.exp_id.clone(),
-        backend: args.backend.clone(),
-        flavor: args.flavor.clone(),
-        host: args.host.clone(),
-        container: args.container.clone(),
-        no_container: args.no_container,
-        manifest: args.manifest.clone(),
-        image: args.image.clone(),
-        timeout: args.timeout.clone(),
-        org: args.org.clone(),
-        provider: args.provider.clone(),
-        disk: args.disk,
-        force: args.force,
-        chat_session_id: args.launching_chat_session(),
-        agent_origin: args.agent_origin.clone(),
-    };
+    let request = CreateRunReq::from_run_args(args)?;
     let response =
         authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
             .json(&request)
@@ -2229,10 +2291,16 @@ pub(crate) async fn submit_run_via_up(
         .and_then(|backend| backend.get("jobId"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let slurm_resources = response
+        .run
+        .backend
+        .and_then(|backend| serde_json::from_value(backend).ok())
+        .and_then(|backend| local::slurm::requested_resources(&backend));
     Ok(RunLaunchSummary {
         run_id: response.run.id,
         experiment_id: args.exp_id.clone(),
         job_id,
+        slurm_resources,
     })
 }
 
@@ -2256,7 +2324,11 @@ pub(crate) async fn harness_install_via_up(port: u16, harness: &str) -> Result<H
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     let response = authenticate_up_request(
-        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+        local_client()?
+            .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+            .json(&CancelRunReq {
+                chat_session_id: local::chat::launching_chat_session(),
+            }),
     )
     .send()
     .await
@@ -2265,9 +2337,45 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Launching with orx up's settings after the caller checked its own would
+/// submit to a different cluster or namespace than the one the caller tested.
+/// A relative `XDG_CONFIG_HOME` names a different dir in each process's working directory.
+fn absolute_config_dir() -> std::path::PathBuf {
+    let dir = crate::config::config_dir();
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+fn require_caller_config_dir(
+    caller: Option<&std::path::Path>,
+    own: &std::path::Path,
+) -> Result<()> {
+    let Some(caller) = caller else {
+        return Ok(());
+    };
+    let same = caller == own
+        || crate::paths::canonicalize(caller)
+            .ok()
+            .zip(crate::paths::canonicalize(own).ok())
+            .is_some_and(|(a, b)| a == b);
+    if same {
+        return Ok(());
+    }
+    let base = own.parent().unwrap_or(own);
+    Err(anyhow!(
+        "This command uses the compute settings in {}, but orx up launches runs with \
+         the settings in {}. Set XDG_CONFIG_HOME to {} and re-run, or restart orx up \
+         from this environment.",
+        caller.display(),
+        own.display(),
+        base.display()
+    ))
+}
+
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
     reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
+    require_caller_config_dir(req.caller_config_dir.as_deref(), &absolute_config_dir())
+        .map_err(bad_request)?;
     let store = Store::open()?;
     let experiment = store
         .get_local_experiment(&req.experiment_id)?
@@ -2276,30 +2384,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .project_lifecycle
         .admit(&experiment.project_id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    let mut backend = req.backend;
-    let mut flavor = req.flavor;
-    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
-    local::apply_compute_default(&mut backend, &mut flavor);
-    let args = crate::ExpRunArgs {
-        invocation_context: req.invocation_context,
-        telemetry_suppressed: req.telemetry_suppressed,
-        exp_id: req.experiment_id,
-        disk: req.disk,
-        provider: req.provider,
-        backend: Some(backend.unwrap_or_else(|| "local".to_string())),
-        flavor,
-        org: req.org,
-        host: req.host,
-        container: req.container,
-        no_container: req.no_container,
-        manifest: req.manifest,
-        image: req.image,
-        timeout: req.timeout,
-        force: req.force,
-        chat_session_id: req.chat_session_id,
-        agent_origin: req.agent_origin,
-        forwarded: true,
-    };
+    // Dashboard callers may omit compute options; forwarded CLI requests arrive resolved.
+    let args = req.into_run_args();
     crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
@@ -2359,7 +2445,18 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+/// Sent by `orx exp cancel`; the dashboard and older CLIs post no body.
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CancelRunReq {
+    chat_session_id: Option<String>,
+}
+
+async fn cancel_run(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    req: Option<Json<CancelRunReq>>,
+) -> ApiResult {
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
@@ -2367,8 +2464,12 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     if is_terminal(&run.status) {
         return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
+    let reason = match req {
+        Some(Json(req)) => crate::commands::exp::exp_cancel_reason(req.chat_session_id.as_deref()),
+        None => "Cancel requested through orx up (dashboard or an older orx CLI).".into(),
+    };
     let backend = backend_for_run(&run)?;
-    backend.cancel(&run).await.map_err(bad_request)?;
+    backend.cancel(&run, &reason).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -2597,7 +2698,8 @@ struct StarterPromptsQuery {
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
 /// model call — so the UI shows a placeholder while it waits. A blank project
-/// is flagged instead so the UI shows its pre-written prompts.
+/// with no profile to tailor to, or whose tailored prompts fail, is flagged so
+/// the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -4495,6 +4597,62 @@ impl axum::body::HttpBody for ActiveBody {
     }
 }
 
+const ORPHANED_RUN_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// SSH container launches record their handle before the job starts; leave them this long to finish.
+const ORPHANED_RUN_SETTLE_MS: i64 = 5 * 60 * 1000;
+
+/// Give a supervisor to every submitted local run that has none, so a launch
+/// whose supervisor spawn failed (OR-334) is tracked instead of stuck `starting`.
+async fn adopt_orphaned_runs(moving: Arc<AtomicBool>, gate: Arc<tokio::sync::Mutex<()>>) {
+    // Runs whose spawn failure is already logged, so a stuck run logs once.
+    let mut reported = HashSet::new();
+    loop {
+        tokio::time::sleep(ORPHANED_RUN_SCAN_INTERVAL).await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        let _gate = gate.lock().await;
+        if moving.load(Ordering::SeqCst) {
+            continue;
+        }
+        match tokio::task::spawn_blocking(adopt_orphaned_runs_once).await {
+            Ok(Ok(failures)) => {
+                for (run_id, err) in failures {
+                    if reported.insert(run_id.clone()) {
+                        eprintln!("orx up: could not recover supervisor for run {run_id}: {err}");
+                    }
+                }
+            }
+            Ok(Err(err)) => {
+                eprintln!("orx up: could not check runs for missing supervisors: {err}")
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Spawns the missing supervisors and returns the runs whose spawn failed.
+fn adopt_orphaned_runs_once() -> Result<Vec<(String, crate::error::Error)>> {
+    let store = Store::open()?;
+    let mut failures = Vec::new();
+    for run in store.list_active_runs()? {
+        // Without a job handle the launch may still be submitting, and a supervisor would fail it.
+        let submitted = crate::jobs::BackendDescriptor::parse(&run.backend_json)
+            .is_ok_and(|descriptor| descriptor.job_id.is_some());
+        if !submitted
+            || now_ms() - run.updated_at < ORPHANED_RUN_SETTLE_MS
+            || store.get_local_experiment(&run.experiment_id)?.is_none()
+            || crate::commands::supervise::supervisor_running(&run.id)
+        {
+            continue;
+        }
+        if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
+            failures.push((run.id, err));
+        }
+    }
+    Ok(failures)
+}
+
 /// Relaunch into an update installed underneath this server once that interrupts nothing,
 /// so a long-lived `orx up` stops launching runs and building sandboxes with old code.
 fn spawn_restart_when_idle(state: AppState) {
@@ -4505,29 +4663,46 @@ fn spawn_restart_when_idle(state: AppState) {
             // The cache can claim an install the exec target doesn't have; never restart in a loop.
             if !(status.auto_update
                 && status.restart_required
-                && updates::newer_exe_on_disk().await)
+                && (updates::deferred_update_due() || updates::newer_exe_on_disk().await))
             {
                 continue;
             }
-            DRAINING.store(true, Ordering::SeqCst);
-            if ACTIVE.load(Ordering::SeqCst) == 0
-                && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
-                && state.remote_sessions.list().await.iter().all(|session| {
-                    matches!(
-                        session.status,
-                        RemoteSessionStatus::Disconnected
-                            | RemoteSessionStatus::NeedsInstall
-                            | RemoteSessionStatus::NeedsUpdate
-                    )
-                })
-                && state.chat.stop_admitting_if_idle().await
-            {
+            if begin_restart(&state, 0).await {
                 state.restart.notify_one();
                 return;
             }
-            DRAINING.store(false, Ordering::SeqCst);
         }
     });
+}
+
+/// Serializes restart attempts; true once one committed, after which nothing reopens admission.
+static RESTART_COMMITTED: tokio::sync::Mutex<bool> = tokio::sync::Mutex::const_new(false);
+
+/// Stop admitting work and commit to a restart if nothing is in flight beyond
+/// `own_requests` (the caller's). Returns false, and admits again, otherwise.
+async fn begin_restart(state: &AppState, own_requests: usize) -> bool {
+    let mut committed = RESTART_COMMITTED.lock().await;
+    if *committed {
+        return true;
+    }
+    DRAINING.store(true, Ordering::SeqCst);
+    if ACTIVE.load(Ordering::SeqCst) <= own_requests
+        && !state.data_dir_move_in_progress.load(Ordering::SeqCst)
+        && state.remote_sessions.list().await.iter().all(|session| {
+            matches!(
+                session.status,
+                RemoteSessionStatus::Disconnected
+                    | RemoteSessionStatus::NeedsInstall
+                    | RemoteSessionStatus::NeedsUpdate
+            )
+        })
+        && state.chat.stop_admitting_if_idle().await
+    {
+        *committed = true;
+        return true;
+    }
+    DRAINING.store(false, Ordering::SeqCst);
+    false
 }
 
 /// Startup summary of detected coding agents. Never blocks. It goes through
@@ -5348,6 +5523,23 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
             "no newer orx is installed to restart into".into(),
         ));
     };
+    // A dashboard poll landing alongside the click is not work worth refusing over.
+    let mut began = false;
+    for _ in 0..10 {
+        began = begin_restart(&state, 1).await;
+        if began {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !began {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "OpenResearch is busy: a chat turn, queued message, approval, open terminal, \
+             remote session, or request is still in progress. Try again once it finishes."
+                .into(),
+        ));
+    }
     let restart = state.restart.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -5681,6 +5873,7 @@ async fn send_ssh_connect_error(
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 pub(crate) async fn ssh_connect(
@@ -5920,6 +6113,7 @@ async fn ssh_connect_socket(
         if let Some(test) = ssh_test {
             record_ssh_host_test(&test).await;
         }
+        close_socket(&mut socket).await;
     }
 }
 
@@ -6054,6 +6248,7 @@ async fn project_terminal(
             Ok(status) => {
                 let message = json!({ "type": "exit", "code": status.exit_code() });
                 let _ = socket.send(Message::Text(message.to_string().into())).await;
+                close_socket(&mut socket).await;
             }
             Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
         }
@@ -6221,12 +6416,31 @@ async fn command_terminal(
             .send(Message::Text(message.to_string().into()))
             .await
             .is_err()
-            || !shell_after
         {
             return;
         }
-        continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        if shell_after {
+            continue_in_shell(&mut socket, &mut size, Vec::new()).await;
+        } else {
+            close_socket(&mut socket).await;
+        }
     })
+}
+
+/// WebKit drops the final frame of a socket closed without a close handshake,
+/// so send Close and wait for the client's before dropping it.
+async fn close_socket(socket: &mut WebSocket) {
+    if socket.send(Message::Close(None)).await.is_err() {
+        return;
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(message)) = socket.recv().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 /// Hand the terminal to the user's interactive shell, with any env the command
@@ -6240,7 +6454,9 @@ async fn continue_in_shell(
     let (shell, args) = interactive_shell();
     match spawn_pty(shell, args, env, *size).await {
         Ok(session) => {
-            relay_pty(socket, session, None, size, None).await;
+            if relay_pty(socket, session, None, size, None).await.is_some() {
+                close_socket(socket).await;
+            }
         }
         Err(error) => send_terminal_error(socket, error).await,
     }
@@ -6264,6 +6480,7 @@ async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
                 .into(),
         ))
         .await;
+    close_socket(socket).await;
 }
 
 async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
@@ -6701,6 +6918,51 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
         return out;
     }
     seed_harnesses_locked(state, &mut cache).await
+}
+
+/// Commit one harness's full detection after setup changed it, so the
+/// dashboard need not wait on every sibling's probes to see the result.
+async fn publish_harness(state: &AppState, info: &local::harness::HarnessInfo) {
+    if info.id == "claude-code" {
+        if let Some(probe) = info.auth_observation.as_ref() {
+            state.claude.observe_auth_probe(probe);
+        }
+    }
+    let catalog = claude_catalog_request(std::slice::from_ref(info));
+    let mut cache = state.harnesses.lock().await;
+    // Bumping `at` voids a fill that probed before setup ran (and any cursor
+    // lookup keyed to it); a fresh seed's fill probes after, so it keeps its `at`.
+    let claim = cache.is_some();
+    if !claim {
+        seed_harnesses_locked(state, &mut cache).await;
+    }
+    let Some((at, payload)) = cache.as_mut() else {
+        return;
+    };
+    let Some(slot) = payload["harnesses"]
+        .as_array_mut()
+        .and_then(|all| all.iter_mut().find(|h| h["id"].as_str() == Some(info.id)))
+    else {
+        return;
+    };
+    *slot = json!(info);
+    if claim {
+        *at = std::time::Instant::now();
+    }
+    let cached_at = *at;
+    let lookup_voided = claim
+        && payload["harnesses"].as_array().is_some_and(|all| {
+            all.iter()
+                .any(|h| h["id"] == "cursor" && h["accountLoading"] == true)
+        });
+    if lookup_voided || info.id == "cursor" {
+        spawn_cursor_account_details(state, payload, cached_at);
+    }
+    drop(cache);
+    if let Some(catalog) = catalog {
+        enqueue_claude_catalog(state.clone(), cached_at, catalog);
+    }
+    state.chat.emit_event("harness.catalog", json!({}));
 }
 
 /// The spawn-free snapshot → provisional cache → background fill sequence,
@@ -8149,6 +8411,31 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn empty_local_error_reports_the_http_status() {
+        for (status, body, expected) in [
+            (StatusCode::BAD_GATEWAY, "", "HTTP 502 Bad Gateway"),
+            (StatusCode::NOT_FOUND, "", "HTTP 404 Not Found"),
+            (
+                StatusCode::BAD_REQUEST,
+                r#"{"error":""}"#,
+                "HTTP 400 Bad Request",
+            ),
+        ] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body(body.to_string())
+                .unwrap();
+            let error = decode_local_response::<Value>(response.into(), "start the run")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("orx up could not start the run: {expected}")
+            );
+        }
+    }
+
     #[test]
     fn successful_recheck_clears_stale_claude_warning() {
         let host = local::claude::ClaudeHost::new();
@@ -8255,7 +8542,13 @@ mod tests {
         let url = format!("http://{}/file", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await });
 
-        let response = reqwest::get(url).await.unwrap();
+        let response = crate::net::loopback_client()
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap();
         assert_eq!(ACTIVE.load(Ordering::SeqCst), 1);
         release.notify_one();
         assert_eq!(response.text().await.unwrap(), "done");
@@ -8638,6 +8931,7 @@ mod tests {
             commit_sha: None,
             result_markdown: None,
             cancel_requested: true,
+            cancel_reason: None,
             chat_session_id: None,
         };
 
@@ -8660,35 +8954,66 @@ mod tests {
     }
 
     #[test]
-    fn create_run_request_round_trips_agent_attribution_and_force() {
-        let request = CreateRunReq {
+    fn create_run_request_preserves_forwarded_slurm_resources_and_attribution() {
+        let args = crate::ExpRunArgs {
             invocation_context: None,
             telemetry_suppressed: true,
-            experiment_id: "experiment-1".into(),
-            backend: Some("local".into()),
+            forwarded: false,
+            exp_id: "experiment-1".into(),
+            disk: None,
+            provider: None,
+            backend: Some("slurm".into()),
             flavor: None,
+            org: None,
             host: None,
             container: None,
             no_container: false,
             manifest: None,
             image: None,
             timeout: None,
-            org: None,
-            provider: None,
-            disk: None,
+            cpus: Some(8),
+            mem: Some("64G".into()),
             force: true,
             chat_session_id: Some("session-1".into()),
             agent_origin: None,
         };
+        let request = CreateRunReq::from_run_args(&args).unwrap();
 
         let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["callerConfigDir"], json!(absolute_config_dir()));
         assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["cpus"], 8);
+        assert_eq!(value["mem"], "64G");
         assert_eq!(value["chatSessionId"], "session-1");
         assert_eq!(value["force"], true);
-        assert_eq!(
-            serde_json::from_value::<CreateRunReq>(value).unwrap(),
-            request
-        );
+        let forwarded = serde_json::from_value::<CreateRunReq>(value)
+            .unwrap()
+            .into_run_args();
+        assert_eq!(forwarded.cpus, Some(8));
+        assert_eq!(forwarded.mem.as_deref(), Some("64G"));
+        assert_eq!(forwarded.chat_session_id.as_deref(), Some("session-1"));
+        assert!(forwarded.force);
+    }
+
+    #[test]
+    fn require_caller_config_dir_rejects_a_different_dir() {
+        let root = std::env::temp_dir().join(format!("orx-caller-config-{}", uuid::Uuid::new_v4()));
+        let own = root.join("up/openresearch");
+        let caller = root.join("agent/openresearch");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&caller).unwrap();
+
+        assert!(require_caller_config_dir(None, &own).is_ok());
+        assert!(require_caller_config_dir(Some(&own), &own).is_ok());
+        let fresh = root.join("fresh/openresearch");
+        assert!(require_caller_config_dir(Some(&fresh), &fresh).is_ok());
+        assert!(require_caller_config_dir(Some(&own.join("../openresearch")), &own).is_ok());
+        let error = require_caller_config_dir(Some(&caller), &own)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&caller.display().to_string()));
+        assert!(error.contains(&own.display().to_string()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
